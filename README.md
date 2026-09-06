@@ -1,0 +1,2 @@
+# RAgentByLangChain
+这是一个基于LangChain的RAG企业内部知识库问答Agent系统，技术栈为后端Python+前端Vue3+Mysql+Chroma向量数据库，嵌入模型使用Ollama的qwen3.5:9b，属于入门级Agent项目。
