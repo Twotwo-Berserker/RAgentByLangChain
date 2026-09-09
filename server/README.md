@@ -13,7 +13,7 @@
 
 前置依赖：
 
-1. Python 3.11+，MySQL 运行在 `127.0.0.1:3308`（账号 `root/123456`）。
+1. Python 3.11+，MySQL 运行在 `127.0.0.1:3306`（账号 `root/123456`）。
 2. 启动 Ollama 并拉取模型：
 
    ```bash
@@ -25,7 +25,7 @@
 3. 初始化数据库（创建 `db_enterprise_qa` 及表结构、测试数据）：
 
    ```bash
-   mysql -h127.0.0.1 -P3308 -uroot -p123456 < sql/init.sql
+   mysql --default-character-set=utf8mb4 -h127.0.0.1 -P3306 -uroot -p123456 < sql/init.sql
    ```
 
 启动服务：

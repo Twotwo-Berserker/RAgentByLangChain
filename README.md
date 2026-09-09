@@ -18,7 +18,7 @@
 | 前端 | Vue 3 + Vite + Vue Router + Pinia + Element Plus + ECharts |
 | 后端 | Flask + Flask-SQLAlchemy + Flask-CORS + PyJWT |
 | 向量库 | LangChain + ChromaDB |
-| 数据库 | MySQL（`db_enterprise_qa`，端口 3308） |
+| 数据库 | MySQL（`db_enterprise_qa`，端口 3306） |
 | 模型 | Ollama：`qwen3.5:9b`（对话）、`qwen3-embedding:4b`（嵌入） |
 
 ## 目录结构
@@ -45,7 +45,7 @@ RAgentByLangChain/
 
 ## 快速开始
 
-前置依赖：Python 3.11+、Node.js 18+、MySQL 8（端口 3308）、Ollama。
+前置依赖：Python 3.11+、Node.js 18+、MySQL 8（端口 3306）、Ollama。
 
 1. 启动 Ollama 并拉取模型：
 
@@ -58,8 +58,11 @@ RAgentByLangChain/
 2. 初始化数据库：
 
    ```bash
-   mysql -h127.0.0.1 -P3308 -uroot -p123456 < server/sql/init.sql
+   mysql --default-character-set=utf8mb4 -h127.0.0.1 -P3306 -uroot -p123456 < server/sql/init.sql
    ```
+   开启数据库
+   ```bash
+
 
 3. 启动后端（端口 5000）：
 

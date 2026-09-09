@@ -10,6 +10,8 @@ from models.document import Document
 from models.knowledge_base import KnowledgeBase
 from utils.auth import login_required, admin_required
 from utils.response import success, error, page_response
+from services.vector_service import VectorService, OllamaServiceError
+
 
 # 创建文档蓝图
 doc_bp = Blueprint('document', __name__)
@@ -93,7 +95,6 @@ def upload():
 
     # 进行文档向量化处理
     try:
-        from services.vector_service import VectorService, OllamaServiceError
         vector_service = VectorService()
         chunk_count = vector_service.process_document(doc.id, file_path, file_ext, kb_id)
 
@@ -138,7 +139,6 @@ def delete(doc_id):
 
     # 删除向量数据
     try:
-        from services.vector_service import VectorService
         vector_service = VectorService()
         vector_service.delete_document(doc.id, kb_id)
     except Exception:

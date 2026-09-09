@@ -1,8 +1,11 @@
 -- ============================================
 -- 企业内部知识库问答系统 - 数据库初始化脚本
 -- 数据库名: db_enterprise_qa
--- MySQL端口: 3308
+-- MySQL端口: 3306
 -- ============================================
+
+-- 显式指定连接字符集为 utf8mb4，避免客户端默认 gbk/latin1 误读本文件的 UTF-8 中文导致 1406 报错
+SET NAMES utf8mb4;
 
 -- 创建数据库
 CREATE DATABASE IF NOT EXISTS db_enterprise_qa DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

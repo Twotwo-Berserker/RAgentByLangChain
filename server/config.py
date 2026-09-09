@@ -11,9 +11,9 @@ class Config:
     # Flask密钥，用于JWT签名
     SECRET_KEY = os.environ.get('SECRET_KEY', 'enterprise-qa-secret-key-2024')
 
-    # MySQL数据库配置（端口3308，密码123456）
+    # MySQL数据库配置（端口3306，密码123456）
     MYSQL_HOST = os.environ.get('MYSQL_HOST', '127.0.0.1')
-    MYSQL_PORT = int(os.environ.get('MYSQL_PORT', 3308))
+    MYSQL_PORT = int(os.environ.get('MYSQL_PORT', 3306))
     MYSQL_USER = os.environ.get('MYSQL_USER', 'root')
     MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', '123456')
     MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'db_enterprise_qa')
