@@ -4,6 +4,7 @@
 """
 import os
 import time
+import threading
 from flask import current_app
 from ollama import Client as OllamaClient, ResponseError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -14,6 +15,24 @@ from langchain_chroma import Chroma
 class OllamaServiceError(Exception):
     """Ollama服务相关异常，用于提供更清晰的错误提示"""
     pass
+
+
+# 单例缓存：避免每次请求重复初始化嵌入模型客户端/分割器
+_vector_service_instance = None
+_vector_service_lock = threading.Lock()
+
+
+def get_vector_service():
+    """
+    获取VectorService单例。
+    RAGService 与文档上传/删除共用同一个实例，保证检索器缓存能够被正确失效。
+    """
+    global _vector_service_instance
+    if _vector_service_instance is None:
+        with _vector_service_lock:
+            if _vector_service_instance is None:
+                _vector_service_instance = VectorService()
+    return _vector_service_instance
 
 
 class VectorService:
@@ -33,6 +52,10 @@ class VectorService:
         self.persist_dir = current_app.config['CHROMA_PERSIST_DIR']
         self.batch_size = current_app.config.get('EMBED_BATCH_SIZE', 10)
         self.max_retries = current_app.config.get('EMBED_MAX_RETRIES', 3)
+
+        # 检索器缓存：按知识库ID缓存Chroma检索器，避免每次问答都重建连接
+        self._retriever_cache = {}
+        self._retriever_lock = threading.Lock()
 
     def _check_ollama(self):
         """
@@ -151,12 +174,7 @@ class VectorService:
         metadatas = [{'doc_id': doc_id, 'file_name': file_name, 'chunk_index': i} for i in range(len(chunks))]
         ids = [f"doc_{doc_id}_chunk_{i}" for i in range(len(chunks))]
 
-        collection_name = self._get_collection_name(kb_id)
-        vectorstore = Chroma(
-            collection_name=collection_name,
-            embedding_function=self.embeddings,
-            persist_directory=self.persist_dir
-        )
+        vectorstore = self._get_vectorstore(kb_id)
 
         # 分批写入，降低单次Ollama嵌入请求的压力
         for i in range(0, len(chunks), self.batch_size):
@@ -168,6 +186,9 @@ class VectorService:
                 ids=ids[i:batch_end],
             )
 
+        # 写入后使检索器缓存失效，保证新文档可被检索
+        self.invalidate(kb_id)
+
         return len(chunks)
 
     def delete_document(self, doc_id, kb_id):
@@ -176,27 +197,46 @@ class VectorService:
         :param doc_id: 文档ID
         :param kb_id: 知识库ID
         """
-        collection_name = self._get_collection_name(kb_id)
-        vectorstore = Chroma(
-            collection_name=collection_name,
-            embedding_function=self.embeddings,
-            persist_directory=self.persist_dir
-        )
+        vectorstore = self._get_vectorstore(kb_id)
         # 根据文档ID过滤并删除
         vectorstore._collection.delete(where={'doc_id': doc_id})
 
-    def get_retriever(self, kb_id):
+        # 删除后使检索器缓存失效，避免检索到已删除的文档
+        self.invalidate(kb_id)
+
+    def _get_vectorstore(self, kb_id):
         """
-        获取指定知识库的检索器
+        打开指定知识库的Chroma向量库（不缓存，用于读写操作）
         :param kb_id: 知识库ID
-        :return: Chroma检索器
+        :return: Chroma向量库实例
         """
         collection_name = self._get_collection_name(kb_id)
-        vectorstore = Chroma(
+        return Chroma(
             collection_name=collection_name,
             embedding_function=self.embeddings,
             persist_directory=self.persist_dir
         )
-        return vectorstore.as_retriever(
-            search_kwargs={'k': current_app.config['RETRIEVER_TOP_K']}
-        )
+
+    def get_retriever(self, kb_id):
+        """
+        获取指定知识库的检索器（带缓存）
+        问答接口是高频只读操作，缓存检索器避免每次请求重建Chroma连接。
+        :param kb_id: 知识库ID
+        :return: Chroma检索器
+        """
+        with self._retriever_lock:
+            retriever = self._retriever_cache.get(kb_id)
+            if retriever is None:
+                retriever = self._get_vectorstore(kb_id).as_retriever(
+                    search_kwargs={'k': current_app.config['RETRIEVER_TOP_K']}
+                )
+                self._retriever_cache[kb_id] = retriever
+            return retriever
+
+    def invalidate(self, kb_id):
+        """
+        使指定知识库的检索器缓存失效（文档上传/删除后调用）
+        :param kb_id: 知识库ID
+        """
+        with self._retriever_lock:
+            self._retriever_cache.pop(kb_id, None)

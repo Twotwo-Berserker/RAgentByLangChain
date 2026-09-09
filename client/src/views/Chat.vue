@@ -42,7 +42,7 @@
         </div>
         <ChatMessage v-for="(msg, i) in messages" :key="i" :message="msg" />
         <!-- 加载中提示 -->
-        <div v-if="asking" class="loading-msg">
+        <div v-if="thinking" class="loading-msg">
           <el-avatar :size="36" :icon="Monitor" style="background-color: #67c23a" />
           <div class="loading-bubble">
             <span class="loading-dot">思考中</span>
@@ -83,11 +83,11 @@
  * 左侧选择知识库，右侧进行对话
  * 支持多轮对话，展示AI回答和参考来源
  */
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, nextTick, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Promotion, Loading, Monitor } from '@element-plus/icons-vue'
 import { getAllKB } from '../api/knowledge'
-import { askQuestion } from '../api/chat'
+import { askQuestionStream } from '../api/chat'
 import ChatMessage from '../components/ChatMessage.vue'
 
 /** 知识库列表 */
@@ -104,6 +104,13 @@ const asking = ref(false)
 const sessionId = ref('')
 /** 消息列表DOM引用 */
 const messagesRef = ref(null)
+
+/** 是否仍在等待首个回答片段（用于显示"思考中"提示） */
+const thinking = computed(() => {
+  if (!asking.value) return false
+  const last = messages.value[messages.value.length - 1]
+  return !last || last.role !== 'ai' || !last.content
+})
 
 /** 加载知识库列表 */
 async function loadKBList() {
@@ -147,24 +154,28 @@ async function sendQuestion() {
   asking.value = true
   scrollToBottom()
 
-  try {
-    const res = await askQuestion({
-      question: q,
-      kb_id: selectedKb.value.id,
-      session_id: sessionId.value
-    })
+  // 添加AI占位消息，流式填充
+  messages.value.push({ role: 'ai', content: '', sources: [] })
+  const aiIndex = messages.value.length - 1
 
-    // 添加AI回复
-    messages.value.push({
-      role: 'ai',
-      content: res.data.answer,
-      sources: res.data.source_docs
-    })
+  try {
+    await askQuestionStream(
+      { question: q, kb_id: selectedKb.value.id, session_id: sessionId.value },
+      {
+        onSources: (sources) => {
+          messages.value[aiIndex].sources = sources
+        },
+        onToken: (token) => {
+          messages.value[aiIndex].content += token
+          scrollToBottom()
+        }
+      }
+    )
   } catch (err) {
-    messages.value.push({
-      role: 'ai',
-      content: '抱歉，服务出现异常，请稍后重试。'
-    })
+    // 出错时若无内容则给出提示
+    if (!messages.value[aiIndex].content) {
+      messages.value[aiIndex].content = '抱歉，服务出现异常，请稍后重试。'
+    }
   } finally {
     asking.value = false
     scrollToBottom()

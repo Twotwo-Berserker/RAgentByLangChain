@@ -10,7 +10,7 @@ from models.document import Document
 from models.knowledge_base import KnowledgeBase
 from utils.auth import login_required, admin_required
 from utils.response import success, error, page_response
-from services.vector_service import VectorService, OllamaServiceError
+from services.vector_service import get_vector_service, OllamaServiceError
 
 
 # 创建文档蓝图
@@ -95,7 +95,7 @@ def upload():
 
     # 进行文档向量化处理
     try:
-        vector_service = VectorService()
+        vector_service = get_vector_service()
         chunk_count = vector_service.process_document(doc.id, file_path, file_ext, kb_id)
 
         # 更新文档状态
@@ -139,7 +139,7 @@ def delete(doc_id):
 
     # 删除向量数据
     try:
-        vector_service = VectorService()
+        vector_service = get_vector_service()
         vector_service.delete_document(doc.id, kb_id)
     except Exception:
         pass
