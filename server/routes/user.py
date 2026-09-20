@@ -39,6 +39,20 @@ def get_list():
     return page_response(items, pagination.total, page, page_size)
 
 
+@user_bp.route('/options', methods=['GET'])
+@admin_required
+def options():
+    """
+    获取用户下拉选项（仅管理员）
+    供对话历史页「按提问者筛选」使用：不分页，只返回启用状态的用户
+    """
+    users = User.query.filter_by(status=1).order_by(User.id.asc()).all()
+    return success([
+        {'id': u.id, 'username': u.username, 'nickname': u.nickname or u.username}
+        for u in users
+    ])
+
+
 @user_bp.route('', methods=['POST'])
 @admin_required
 def create():

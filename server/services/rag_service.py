@@ -20,6 +20,12 @@ SYSTEM_PROMPT = """你是一个企业内部知识库智能问答助手。请根�
 2. 如果参考资料中没有相关信息，请如实告知用户
 3. 回答要准确、简洁、专业
 4. 使用中文回答
+5. 必须标注引用来源：凡是依据某条参考资料得出的结论，都要在该句末尾加上来源编号，
+   格式为 [来源N]（N为参考资料序号，例如 [来源1]）。没有依据参考资料的句子不要标注。
+   示例：员工每年享有5天带薪年假[来源1]，入职满3年后增加至10天[来源2]。
+6. 本系统只依据当前检索到的参考资料作答，不具备对话记忆：当用户询问
+   "我刚刚问了什么问题""前面说过什么"这类与知识库无关的问题时，直接说明这一点，
+   不要猜测，也不要给出空回答。
 
 参考资料：
 {context}
@@ -30,6 +36,11 @@ USER_PROMPT = "{question}"
 
 # 未检索到相关内容时的提示
 NO_RESULT_ANSWER = '抱歉，在知识库中未找到与您问题相关的内容，请尝试换个方式提问。'
+
+# 模型返回空回答时的兜底文案
+# 思考型模型偶发"思考结束但正文为空"，不兜底的话界面会留下一个空白气泡，
+# 数据库里也会存下一条空答案
+EMPTY_ANSWER_FALLBACK = '抱歉，本次未能生成有效回答，请尝试重新提问或换个说法。'
 
 
 # 单例缓存：避免每次请求都重新初始化LLM/向量服务
@@ -56,12 +67,19 @@ class RAGService:
 
     def __init__(self):
         """初始化LLM模型和向量服务"""
-        self.llm = ChatOllama(
+        model = ChatOllama(
             model=current_app.config['OLLAMA_LLM_MODEL'],
             base_url=current_app.config['OLLAMA_BASE_URL'],
             temperature=0.3,
+            num_ctx=current_app.config['LLM_NUM_CTX'],
+            num_predict=current_app.config['LLM_NUM_PREDICT'],
             timeout=3600
         )
+        # think 透传给 Ollama：关闭思考后同一个问题从 203s 降到 6s，
+        # 也不再出现"思考吃掉全部预算、正文为空"的空白回答。
+        # 配置为 None 时不发送该参数，兼容不支持思考的模型（见 config.LLM_THINK）
+        think = current_app.config.get('LLM_THINK')
+        self.llm = model.bind(think=think) if think is not None else model
         self.vector_service = get_vector_service()
 
         # 提示词模板只构建一次
@@ -72,32 +90,34 @@ class RAGService:
 
     def _format_docs(self, docs):
         """
-        将检索到的文档格式化为上下文文本
+        将检索到的文档格式化为上下文文本。
+        编号格式与提示词中的引用标记 [来源N] 保持一致，便于前端溯源。
         :param docs: 检索到的文档列表
         :return: 格式化后的文本
         """
         formatted = []
         for i, doc in enumerate(docs, 1):
             source = doc.metadata.get('file_name', '未知来源')
-            formatted.append(f"[来源{i}: {source}]\n{doc.page_content}")
+            formatted.append(f"[来源{i}] 文件：{source}\n{doc.page_content}")
         return '\n\n'.join(formatted)
 
     def _extract_source_docs(self, docs):
         """
-        提取参考文档来源信息
+        提取参考文档来源信息。
+        index 对应提示词中的 [来源N]，content 保留完整分块内容，
+        供前端在原文中定位并高亮被引用的片段。
         :param docs: 检索到的文档列表
         :return: 来源信息列表
         """
         sources = []
-        seen = set()
-        for doc in docs:
-            file_name = doc.metadata.get('file_name', '未知')
-            if file_name not in seen:
-                seen.add(file_name)
-                sources.append({
-                    'file_name': file_name,
-                    'content': doc.page_content[:200]
-                })
+        for i, doc in enumerate(docs, 1):
+            sources.append({
+                'index': i,
+                'file_name': doc.metadata.get('file_name', '未知'),
+                'doc_id': doc.metadata.get('doc_id'),
+                'chunk_index': doc.metadata.get('chunk_index'),
+                'content': doc.page_content
+            })
         return sources
 
     def _build_chain(self, docs):
@@ -138,9 +158,27 @@ class RAGService:
             return NO_RESULT_ANSWER, []
 
         answer = self._build_chain(docs).invoke(question)
+        answer = self._guard_empty_answer(answer, question, kb_id)
         source_docs = self._extract_source_docs(docs)
 
         return answer, source_docs
+
+    def _guard_empty_answer(self, answer, question, kb_id):
+        """
+        空回答兜底：模型返回空白时替换为提示文案并记录日志。
+        空白回答既不该展示给用户，也不该落库，否则界面上是个空气泡、历史里是条空记录。
+        :param answer: 模型返回的回答
+        :param question: 用户问题（仅用于日志）
+        :param kb_id: 知识库ID（仅用于日志）
+        :return: 兜底后的回答
+        """
+        if answer and answer.strip():
+            return answer
+
+        current_app.logger.warning(
+            f'模型返回空回答，已替换为兜底文案（kb_id={kb_id}, question={question[:50]}）'
+        )
+        return EMPTY_ANSWER_FALLBACK
 
     def stream(self, question, kb_id):
         """
@@ -159,5 +197,13 @@ class RAGService:
 
         yield {'type': 'sources', 'data': self._extract_source_docs(docs)}
 
+        answer_parts = []
         for chunk in self._build_chain(docs).stream(question):
+            answer_parts.append(chunk)
             yield {'type': 'token', 'data': chunk}
+
+        # 流式没有产出任何正文时补一条兜底文案，避免前端留下空白气泡
+        answer = ''.join(answer_parts)
+        fallback = self._guard_empty_answer(answer, question, kb_id)
+        if fallback != answer:
+            yield {'type': 'token', 'data': fallback}

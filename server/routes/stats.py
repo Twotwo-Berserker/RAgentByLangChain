@@ -59,11 +59,40 @@ def overview():
 
     kb_doc_data = [{'name': name, 'value': count} for name, count in kb_doc_stats]
 
+    # 回答反馈统计：赞 / 踩 / 未评价，以及好评率（赞占已评价的比例）
+    like_count = ChatHistory.query.filter_by(feedback=1).count()
+    dislike_count = ChatHistory.query.filter_by(feedback=-1).count()
+    unrated_count = ChatHistory.query.filter_by(feedback=0).count()
+    rated_count = like_count + dislike_count
+    like_rate = round(like_count / rated_count * 100, 1) if rated_count else 0.0
+
+    # 被踩最多的知识库，用于定位需要补充/修正内容的知识库
+    bad_kb_stats = db.session.query(
+        KnowledgeBase.kb_name,
+        func.count(ChatHistory.id)
+    ).join(
+        ChatHistory, ChatHistory.kb_id == KnowledgeBase.id
+    ).filter(
+        ChatHistory.feedback == -1
+    ).group_by(
+        KnowledgeBase.kb_name
+    ).order_by(
+        func.count(ChatHistory.id).desc()
+    ).limit(5).all()
+
     return success({
         'user_count': user_count,
         'kb_count': kb_count,
         'doc_count': doc_count,
         'today_chat_count': today_chat_count,
         'trend_data': trend_data,
-        'kb_doc_data': kb_doc_data
+        'kb_doc_data': kb_doc_data,
+        'feedback_stats': {
+            'like_count': like_count,
+            'dislike_count': dislike_count,
+            'unrated_count': unrated_count,
+            'rated_count': rated_count,
+            'like_rate': like_rate,
+            'bad_kb_data': [{'name': name, 'value': count} for name, count in bad_kb_stats]
+        }
     })

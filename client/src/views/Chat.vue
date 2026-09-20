@@ -28,9 +28,19 @@
       <div class="chat-header">
         <span v-if="selectedKb">
           <el-icon><ChatDotRound /></el-icon>
-          正在查询：{{ selectedKb.kb_name }}
+          当前知识库：{{ selectedKb.kb_name }}
         </span>
         <span v-else class="hint">请先从左侧选择一个知识库</span>
+        <span v-if="messages.length" class="keep-hint">切换知识库或页面都不会清空对话</span>
+        <el-button
+          v-if="messages.length"
+          text
+          size="small"
+          class="clear-btn"
+          @click="clearChat"
+        >
+          <el-icon><Delete /></el-icon>清空对话
+        </el-button>
       </div>
 
       <!-- 消息列表 -->
@@ -40,7 +50,12 @@
           <h3>欢迎使用企业知识库问答系统</h3>
           <p>请从左侧选择知识库，然后输入您的问题</p>
         </div>
-        <ChatMessage v-for="(msg, i) in messages" :key="i" :message="msg" />
+        <ChatMessage
+          v-for="(msg, i) in messages"
+          :key="i"
+          :message="msg"
+          @feedback="(value, comment) => handleFeedback(i, value, comment)"
+        />
         <!-- 加载中提示 -->
         <div v-if="thinking" class="loading-msg">
           <el-avatar :size="36" :icon="Monitor" style="background-color: #67c23a" />
@@ -81,27 +96,26 @@
 /**
  * 智能问答对话页面
  * 左侧选择知识库，右侧进行对话
- * 支持多轮对话，展示AI回答和参考来源
+ * 对话状态（消息列表、会话ID、选中知识库）由 Pinia store 持有，
+ * 因此切换到其他页面再回来内容不会丢失，流式回答也会继续写入。
  */
-import { ref, onMounted, nextTick, computed } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
-import { Promotion, Loading, Monitor } from '@element-plus/icons-vue'
+import { Promotion, Loading, Monitor, Delete } from '@element-plus/icons-vue'
 import { getAllKB } from '../api/knowledge'
-import { askQuestionStream } from '../api/chat'
+import { useChatStore } from '../stores/chat'
 import ChatMessage from '../components/ChatMessage.vue'
+
+const chatStore = useChatStore()
+const { messages, asking } = storeToRefs(chatStore)
 
 /** 知识库列表 */
 const kbList = ref([])
 /** 当前选中的知识库 */
 const selectedKb = ref(null)
-/** 对话消息列表 */
-const messages = ref([])
 /** 当前输入的问题 */
 const question = ref('')
-/** 是否正在请求中 */
-const asking = ref(false)
-/** 当前会话ID */
-const sessionId = ref('')
 /** 消息列表DOM引用 */
 const messagesRef = ref(null)
 
@@ -117,22 +131,36 @@ async function loadKBList() {
   try {
     const res = await getAllKB()
     kbList.value = res.data
+    // 恢复上次选中的知识库（对话内容由 store 从 sessionStorage 恢复）
+    if (chatStore.kbId) {
+      const found = kbList.value.find((kb) => kb.id === chatStore.kbId)
+      if (found) {
+        selectedKb.value = found
+      } else {
+        // 知识库已被删除/禁用，清掉残留对话，避免展示查不到的知识库内容
+        chatStore.reset()
+      }
+    }
   } catch (err) {
     // 错误已在拦截器处理
   }
 }
 
-/** 选择知识库 */
+/**
+ * 选择知识库
+ * 只影响后续提问的检索范围，已有对话保留（由 store 保证），
+ * 因此切换知识库后可以直接追问，不必担心历史问答被清掉
+ */
 function selectKb(kb) {
   if (selectedKb.value?.id === kb.id) return
   selectedKb.value = kb
-  messages.value = []
-  sessionId.value = generateSessionId()
+  chatStore.selectKb(kb)
 }
 
-/** 生成会话ID */
-function generateSessionId() {
-  return 'sess_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+/** 清空当前对话 */
+function clearChat() {
+  chatStore.reset()
+  ElMessage.success('已清空对话')
 }
 
 /** 自动滚动到底部 */
@@ -148,41 +176,38 @@ async function sendQuestion() {
   const q = question.value.trim()
   if (!q || !selectedKb.value || asking.value) return
 
-  // 添加用户消息
-  messages.value.push({ role: 'user', content: q })
   question.value = ''
-  asking.value = true
+  // 请求在 store 中执行，切页/组件卸载都不会中断
+  // 带上当前知识库，回答上会标注它基于哪个知识库（对话可跨知识库延续）
+  const promise = chatStore.sendQuestion(q, selectedKb.value)
   scrollToBottom()
+  await promise
+  scrollToBottom()
+}
 
-  // 添加AI占位消息，流式填充
-  messages.value.push({ role: 'ai', content: '', sources: [] })
-  const aiIndex = messages.value.length - 1
-
+/** 提交反馈（赞 / 踩） */
+async function handleFeedback(index, value, comment) {
   try {
-    await askQuestionStream(
-      { question: q, kb_id: selectedKb.value.id, session_id: sessionId.value },
-      {
-        onSources: (sources) => {
-          messages.value[aiIndex].sources = sources
-        },
-        onToken: (token) => {
-          messages.value[aiIndex].content += token
-          scrollToBottom()
-        }
-      }
-    )
+    await chatStore.sendFeedback(index, value, comment)
+    if (value === 1) ElMessage.success('感谢反馈，已标记为有帮助')
+    else if (value === -1) ElMessage.success('感谢反馈，我们会持续优化回答质量')
   } catch (err) {
-    // 出错时若无内容则给出提示
-    if (!messages.value[aiIndex].content) {
-      messages.value[aiIndex].content = '抱歉，服务出现异常，请稍后重试。'
-    }
-  } finally {
-    asking.value = false
-    scrollToBottom()
+    ElMessage.error('反馈提交失败，请稍后重试')
   }
 }
 
-onMounted(() => loadKBList())
+// 流式过程中内容不断增长，持续滚动到底部
+watch(
+  () => messages.value[messages.value.length - 1]?.content,
+  () => {
+    if (asking.value) scrollToBottom()
+  }
+)
+
+onMounted(async () => {
+  await loadKBList()
+  scrollToBottom()
+})
 </script>
 
 <style scoped>
@@ -264,6 +289,7 @@ onMounted(() => loadKBList())
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .chat-header {
@@ -278,6 +304,19 @@ onMounted(() => loadKBList())
 }
 
 .chat-header .hint {
+  color: #909399;
+}
+
+/* 提示文案占据剩余空间，把「清空对话」按钮顶到最右侧 */
+.keep-hint {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: #c0c4cc;
+}
+
+.clear-btn {
+  margin-left: 12px;
   color: #909399;
 }
 

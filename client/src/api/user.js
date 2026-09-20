@@ -8,6 +8,11 @@ export function getUserList(params) {
   return request.get('/user/list', { params })
 }
 
+/** 获取用户下拉选项（仅管理员，用于「按提问者筛选」） */
+export function getUserOptions() {
+  return request.get('/user/options')
+}
+
 /** 新增用户 */
 export function createUser(data) {
   return request.post('/user', data)

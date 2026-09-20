@@ -7,8 +7,10 @@
 - 用户登录 / JWT 鉴权，管理员与普通用户权限隔离
 - 知识库管理：创建、编辑、删除（逻辑删除）
 - 文档管理：上传（txt / pdf / md / docx）、解析分块、向量化、删除
-- RAG 智能问答：向量检索 + LLM 生成，返回答案与引用来源
-- 对话历史：按会话 / 用户分页查询
+- RAG 智能问答：向量检索 + LLM 生成，流式输出（NDJSON），返回答案与引用来源
+- 知识溯源：回答中的 `[来源N]` 角标可点击，展开原文并高亮被引用的片段
+- 回答反馈：赞 / 踩（可附原因），管理端汇总好评率与差评最多的知识库
+- 对话历史：按会话 / 用户分页查询，支持按知识库和反馈筛选
 - 首页数据统计（ECharts 可视化）
 
 ## 技术栈
@@ -47,6 +49,16 @@ RAgentByLangChain/
 
 前置依赖：Python 3.11+、Node.js 18+、MySQL 8（端口 3306）、Ollama。
 
+> **Windows 上 MySQL 是作为服务安装的，装完不等于在跑，需要手动启动**，否则后面所有数据库操作都会
+> 报 `Can't connect to MySQL server on '127.0.0.1:3306' (10061)`：
+>
+> ```bash
+> net start MySQL80          # 需要以管理员身份打开终端；服务名以实际安装为准
+> netstat -ano | findstr :3306   # 看到 LISTENING 才算起来了
+> ```
+>
+> 也可以在「服务」（`services.msc`）里找到 `MySQL80` 手动启动，或设为自动启动。
+
 1. 启动 Ollama 并拉取模型：
 
    ```bash
@@ -55,16 +67,25 @@ RAgentByLangChain/
    ollama pull qwen3-embedding:4b
    ```
 
-2. 初始化数据库：
+2. 启动并初始化数据库
+      ```bash
+      mysql --default-character-set=utf8mb4 -h127.0.0.1 -P3306 -uroot -p123456 < server/sql/init.sql
+      ```
+      或启动**mysql>** 后执行命令 
+      ```bash
+      mysql -u root -p
+      输入密码
+      
+      mysql> SET NAMES utf8mb4;
+      mysql> source .../server/sql/init.sql;
+      ```
+   <br>
 
-   ```bash
-   mysql --default-character-set=utf8mb4 -h127.0.0.1 -P3306 -uroot -p123456 < server/sql/init.sql
-   ```
-   开启数据库
-   ```bash
-
+   > 补充：如果重新执行了 `init.sql`，`t_document` 记录会被清空，但 `server/chroma_data/` 里的向量数据还在，
+   > 两边就对不上了。这种情况直接把 `server/chroma_data/` 目录删掉，重新上传文档向量化即可。
 
 3. 启动后端（端口 5000）：
+   建议为这个项目单独建一个虚拟环境。
 
    ```bash
    cd server
@@ -83,7 +104,13 @@ RAgentByLangChain/
 5. 访问 `http://localhost:3000`，使用测试账号登录：
 
    - 管理员：`admin / 123456`
-   - 普通用户：`user1 / 123456`、`user2 / 123456`
+   - 普通用户：`user1 / 123456`、`user2 / 123456` ...
+
+6. 报错排查顺序建议：
+
+   - 接口报「无法连接Ollama服务」→ 先确认 `ollama serve` 在跑、`ollama list` 能看到`qwen3.5:9b` 和 `qwen3-embedding:4b`。
+   - 问答返回「抱歉，在知识库中未找到与您问题相关的内容」→ 这通常是**正确**结果，说明该知识库没有向量化过的文档。先上传文档（管理员账号 → 文档管理）再问。
+   - 登录直接报 500 → 多半是数据库没初始化好，回到第 2 步用 `SHOW TABLES` 确认。
 
 更详细的启动流程与代码架构见 [client/README.md](client/README.md) 与 [server/README.md](server/README.md)。
 
@@ -93,12 +120,10 @@ RAgentByLangChain/
 - **检索质量**：引入混合检索（BM25 + 向量）、重排序（reranker）、查询改写与多路召回，提升答案准确率。
 - **文档解析**：补充表格、图片 OCR、扫描版 PDF 的解析能力，并支持更大规模文档的异步向量化（Celery 队列）。
 - **工程健壮性**：增加单元测试与接口测试、结构化日志、统一异常处理、数据库迁移工具（Alembic）与部署容器化（Docker Compose）。
-- **性能**：向量检索与 LLM 调用加缓存；对大知识库做索引分片与增量更新；前端路由懒加载与体积优化。
+- **性能**：RAG / 向量服务已做单例复用、检索器按知识库缓存、问答流式输出，仍有优化空间——LLM 结果缓存、大知识库索引分片与增量更新、向量化任务异步化、前端图表按需引入（ECharts 目前打进主包）。
 
 ## 可增加业务
-
-- **流式问答与多轮对话**：基于 SSE 流式输出，支持上下文记忆的连续追问。
-- **知识溯源与反馈**：答案高亮引用原文片段，支持「赞 / 踩」反馈用于后续优化。
+- **多轮对话记忆**：把历史问答带入提示词，支持上下文相关的连续追问（当前每轮独立检索）。
 - **知识库增强**：支持网页 / 接口 / 定时爬取入库，文档版本管理、审核发布流程与标签分类。
 - **权限与协作**：细粒度知识库级授权、组织架构同步、SSO 单点登录。
 - **监控与运营**：问答质量统计、模型调用计费、知识库覆盖率分析、用户行为报表。

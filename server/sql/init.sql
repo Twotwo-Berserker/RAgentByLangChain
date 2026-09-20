@@ -76,6 +76,9 @@ CREATE TABLE t_chat_history (
     question TEXT NOT NULL COMMENT '用户提问',
     answer TEXT NOT NULL COMMENT 'AI回答',
     source_docs TEXT DEFAULT NULL COMMENT '参考文档来源（JSON格式）',
+    feedback TINYINT NOT NULL DEFAULT 0 COMMENT '反馈：1-赞，-1-踩，0-未评价',
+    feedback_comment VARCHAR(500) DEFAULT '' COMMENT '反馈说明（踩的原因等）',
+    feedback_time DATETIME DEFAULT NULL COMMENT '反馈时间',
     create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     FOREIGN KEY (user_id) REFERENCES t_user(id),
     FOREIGN KEY (kb_id) REFERENCES t_knowledge_base(id)

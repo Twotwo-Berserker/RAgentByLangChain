@@ -91,10 +91,12 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '../stores/user'
+import { useChatStore } from '../stores/chat'
 import { UserFilled } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const userStore = useUserStore()
+const chatStore = useChatStore()
 
 /** 控制侧边栏折叠 */
 const isCollapse = ref(false)
@@ -103,6 +105,8 @@ const isCollapse = ref(false)
 function handleCommand(command) {
   if (command === 'logout') {
     userStore.logout()
+    // 清空本地缓存的对话，避免同一浏览器切换账号时看到上一个用户的问答
+    chatStore.reset()
     router.push('/login')
   }
 }

@@ -4,6 +4,7 @@
 """
 import uuid
 import json
+from datetime import datetime
 from flask import Blueprint, request, g, Response, stream_with_context
 from models import db
 from models.chat_history import ChatHistory
@@ -148,26 +149,76 @@ def ask_stream():
     )
 
 
+@chat_bp.route('/feedback', methods=['POST'])
+@login_required
+def feedback():
+    """
+    提交回答反馈（赞/踩），用于后续优化
+    请求参数: chat_id(对话记录ID), feedback(1-赞，-1-踩，0-取消), comment(可选说明)
+    """
+    data = request.get_json()
+    if not data:
+        return error('请提供反馈信息')
+
+    chat_id = data.get('chat_id')
+    value = data.get('feedback')
+    comment = (data.get('comment') or '').strip()
+
+    if not chat_id:
+        return error('缺少对话记录ID')
+    if value not in (1, -1, 0):
+        return error('反馈类型不合法，仅支持 1(赞) / -1(踩) / 0(取消)')
+
+    chat = ChatHistory.query.get(chat_id)
+    if not chat:
+        return error('对话记录不存在', 404)
+
+    # 普通用户只能反馈自己的问答记录，管理员不限
+    if g.role != 'admin' and chat.user_id != g.user_id:
+        return error('无权操作该对话记录', 403)
+
+    chat.feedback = value
+    chat.feedback_comment = comment if value == -1 else ''
+    chat.feedback_time = datetime.now() if value != 0 else None
+    db.session.commit()
+
+    return success({
+        'chat_id': chat.id,
+        'feedback': chat.feedback,
+        'feedback_comment': chat.feedback_comment or '',
+        'feedback_time': chat.feedback_time.strftime('%Y-%m-%d %H:%M:%S') if chat.feedback_time else ''
+    }, '反馈成功' if value != 0 else '已取消反馈')
+
+
 @chat_bp.route('/history', methods=['GET'])
 @login_required
 def get_history():
     """
     获取对话历史列表（分页）
-    查询参数: page, page_size, kb_id(可选)
+    查询参数: page, page_size, kb_id(可选), feedback(可选), user_id(可选，仅管理员)
     普通用户只能查看自己的记录，管理员可查看所有
     """
     page = request.args.get('page', 1, type=int)
     page_size = request.args.get('page_size', 10, type=int)
     kb_id = request.args.get('kb_id', type=int)
+    feedback = request.args.get('feedback', type=int)
+    user_id = request.args.get('user_id', type=int)
 
     query = ChatHistory.query
 
     # 普通用户只能查看自己的对话记录
     if g.role != 'admin':
         query = query.filter_by(user_id=g.user_id)
+    elif user_id:
+        # 管理员可以按提问者筛选（普通用户走上面的分支，该参数对其无效）
+        query = query.filter_by(user_id=user_id)
 
     if kb_id:
         query = query.filter_by(kb_id=kb_id)
+
+    # 按反馈筛选（-1 可快速捞出被踩的问答，用于后续优化）
+    if feedback in (1, -1, 0):
+        query = query.filter_by(feedback=feedback)
 
     query = query.order_by(ChatHistory.create_time.desc())
     pagination = query.paginate(page=page, per_page=page_size, error_out=False)

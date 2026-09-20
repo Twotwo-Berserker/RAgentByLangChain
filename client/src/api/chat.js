@@ -2,6 +2,8 @@
  * 问答对话API
  */
 import request from './index'
+import { ElMessage } from 'element-plus'
+import router from '../router'
 
 /** 发送问题（RAG问答） */
 export function askQuestion(data) {
@@ -32,8 +34,8 @@ export async function askQuestionStream(data, { onSources, onToken } = {}) {
     body: JSON.stringify(data)
   })
 
-  // 非流式错误响应（如 401/400），解析统一错误结构
-  if (!res.ok || res.status !== 200) {
+  // 网关级错误（非 200 的 HTTP 响应），解析统一错误结构
+  if (!res.ok) {
     let message = '网络异常'
     try {
       const body = await res.json()
@@ -49,6 +51,7 @@ export async function askQuestionStream(data, { onSources, onToken } = {}) {
   let buffer = ''
   let finalData = null
   let errorMsg = null
+  let errorCode = null
 
   const handleLine = (line) => {
     let event
@@ -57,6 +60,23 @@ export async function askQuestionStream(data, { onSources, onToken } = {}) {
     } catch (e) {
       return
     }
+
+    // 注意：本项目的后端错误响应 HTTP 状态码恒为 200，错误信息在 body.code / body.message 中，
+    // 与 NDJSON 事件的区分方式是没有 type 字段。这类响应需要单独识别，否则会被当成
+    // 无法解析的事件静默丢弃，用户只能看到"响应异常结束"。
+    if (event.type === undefined && event.code !== undefined) {
+      if (event.code === 401) {
+        // 与 axios 拦截器保持一致：清理登录态并跳转登录页
+        localStorage.removeItem('token')
+        localStorage.removeItem('userInfo')
+        ElMessage.error(event.message || '登录已过期')
+        router.push('/login')
+      }
+      errorCode = event.code
+      errorMsg = event.message || '请求失败'
+      return
+    }
+
     if (event.type === 'sources') {
       onSources && onSources(event.data)
     } else if (event.type === 'token') {
@@ -84,10 +104,24 @@ export async function askQuestionStream(data, { onSources, onToken } = {}) {
   const rest = buffer.trim()
   if (rest) handleLine(rest)
 
-  if (errorMsg) throw new Error(errorMsg)
+  if (errorMsg) {
+    // 错误信息来自后端（统一错误响应或 error 事件），可直接展示给用户
+    const err = new Error(errorMsg)
+    err.code = errorCode
+    err.fromServer = true
+    throw err
+  }
   if (!finalData) throw new Error('响应异常结束')
 
   return finalData
+}
+
+/**
+ * 提交回答反馈（赞 / 踩）
+ * @param {object} data { chat_id, feedback: 1|-1|0, comment }
+ */
+export function submitFeedback(data) {
+  return request.post('/chat/feedback', data)
 }
 
 /** 获取对话历史列表 */

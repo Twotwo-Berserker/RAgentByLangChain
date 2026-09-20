@@ -68,6 +68,56 @@
         </el-card>
       </el-col>
     </el-row>
+
+    <!-- 回答反馈概览：定位需要优化的知识库 -->
+    <el-card shadow="hover">
+      <template #header>
+        <span class="card-title">回答反馈</span>
+        <el-button
+          text
+          size="small"
+          class="more-btn"
+          @click="$router.push('/chat-history')"
+        >
+          查看差评记录
+        </el-button>
+      </template>
+      <div class="feedback-row">
+        <div class="feedback-item">
+          <span class="feedback-label">好评率</span>
+          <span class="feedback-value like">{{ stats.feedback_stats.like_rate }}%</span>
+        </div>
+        <div class="feedback-item">
+          <span class="feedback-label">👍 好评</span>
+          <span class="feedback-value">{{ stats.feedback_stats.like_count }}</span>
+        </div>
+        <div class="feedback-item">
+          <span class="feedback-label">👎 差评</span>
+          <span class="feedback-value dislike">{{ stats.feedback_stats.dislike_count }}</span>
+        </div>
+        <div class="feedback-item">
+          <span class="feedback-label">未评价</span>
+          <span class="feedback-value">{{ stats.feedback_stats.unrated_count }}</span>
+        </div>
+      </div>
+      <div v-if="stats.feedback_stats.bad_kb_data.length" class="bad-kb">
+        <span class="bad-kb-title">差评最多的知识库：</span>
+        <el-tag
+          v-for="item in stats.feedback_stats.bad_kb_data"
+          :key="item.name"
+          size="small"
+          type="danger"
+          class="bad-kb-tag"
+        >
+          {{ item.name }}（{{ item.value }}）
+        </el-tag>
+      </div>
+      <el-empty
+        v-else
+        description="暂无差评数据"
+        :image-size="50"
+      />
+    </el-card>
   </div>
 </template>
 
@@ -87,7 +137,15 @@ const stats = reactive({
   doc_count: 0,
   today_chat_count: 0,
   trend_data: [],
-  kb_doc_data: []
+  kb_doc_data: [],
+  feedback_stats: {
+    like_count: 0,
+    dislike_count: 0,
+    unrated_count: 0,
+    rated_count: 0,
+    like_rate: 0,
+    bad_kb_data: []
+  }
 })
 
 /** 图表DOM引用 */
@@ -243,5 +301,59 @@ onBeforeUnmount(() => {
 .chart-box {
   width: 100%;
   height: 320px;
+}
+
+/* 回答反馈概览 */
+.more-btn {
+  float: right;
+  color: #409eff;
+}
+
+.feedback-row {
+  display: flex;
+  gap: 48px;
+  flex-wrap: wrap;
+}
+
+.feedback-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.feedback-label {
+  font-size: 14px;
+  color: #909399;
+}
+
+.feedback-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #303133;
+}
+
+.feedback-value.like {
+  color: #67c23a;
+}
+
+.feedback-value.dislike {
+  color: #f56c6c;
+}
+
+.bad-kb {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #ebeef5;
+}
+
+.bad-kb-title {
+  font-size: 13px;
+  color: #909399;
+  margin-right: 8px;
+}
+
+.bad-kb-tag {
+  margin-right: 6px;
+  margin-bottom: 6px;
 }
 </style>

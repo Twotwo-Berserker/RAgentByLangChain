@@ -19,6 +19,9 @@ class ChatHistory(db.Model):
     question = db.Column(db.Text, nullable=False, comment='用户提问')
     answer = db.Column(db.Text, nullable=False, comment='AI回答')
     source_docs = db.Column(db.Text, default=None, comment='参考文档来源（JSON格式）')
+    feedback = db.Column(db.SmallInteger, nullable=False, default=0, comment='反馈：1-赞，-1-踩，0-未评价')
+    feedback_comment = db.Column(db.String(500), default='', comment='反馈说明（踩的原因等）')
+    feedback_time = db.Column(db.DateTime, default=None, comment='反馈时间')
     create_time = db.Column(db.DateTime, nullable=False, default=datetime.now, comment='创建时间')
 
     # 关联关系
@@ -44,5 +47,8 @@ class ChatHistory(db.Model):
             'question': self.question,
             'answer': self.answer,
             'source_docs': source_list,
+            'feedback': self.feedback if self.feedback is not None else 0,
+            'feedback_comment': self.feedback_comment or '',
+            'feedback_time': self.feedback_time.strftime('%Y-%m-%d %H:%M:%S') if self.feedback_time else '',
             'create_time': self.create_time.strftime('%Y-%m-%d %H:%M:%S') if self.create_time else ''
         }
