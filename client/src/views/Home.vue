@@ -118,6 +118,35 @@
         :image-size="50"
       />
     </el-card>
+
+    <!-- 缓存概览：命中率反映重复提问被省掉的检索与生成开销 -->
+    <el-card shadow="hover">
+      <template #header>
+        <span class="card-title">答案缓存</span>
+        <span class="card-hint">命中率统计自本次服务启动以来</span>
+      </template>
+      <div class="feedback-row">
+        <div class="feedback-item">
+          <span class="feedback-label">命中率</span>
+          <span class="feedback-value like">{{ stats.cache_stats.hit_rate }}%</span>
+        </div>
+        <div class="feedback-item">
+          <span class="feedback-label">内存命中</span>
+          <span class="feedback-value">{{ stats.cache_stats.l1_hit }}</span>
+        </div>
+        <div class="feedback-item">
+          <span class="feedback-label">数据库命中</span>
+          <span class="feedback-value">{{ stats.cache_stats.l2_hit }}</span>
+        </div>
+        <div class="feedback-item">
+          <span class="feedback-label">未命中</span>
+          <span class="feedback-value">{{ stats.cache_stats.miss }}</span>
+        </div>
+      </div>
+      <div v-if="!stats.cache_stats.l2_available" class="cache-warning">
+        持久层不可用，当前仅使用内存缓存（请确认已执行 sql/migrate_v3_cache.sql）
+      </div>
+    </el-card>
   </div>
 </template>
 
@@ -127,8 +156,23 @@
  * 展示统计卡片和ECharts图表（提问趋势折线图 + 知识库文档占比饼图）
  */
 import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
-import * as echarts from 'echarts'
+// ECharts 按需引入：整包 import * as echarts from 'echarts' 会把全部图表类型、组件和
+// 渲染器打进产物（实测该路由分包 1.1MB / gzip 367kB）。这里只注册本页真正用到的
+// 折线图、饼图与 tooltip/grid/legend 三个组件，其余交给 tree-shaking 剔除。
+import * as echarts from 'echarts/core'
+import { LineChart, PieChart } from 'echarts/charts'
+import { TooltipComponent, GridComponent, LegendComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 import { getOverview } from '../api/stats'
+
+echarts.use([
+  LineChart,
+  PieChart,
+  TooltipComponent,
+  GridComponent,
+  LegendComponent,
+  CanvasRenderer
+])
 
 /** 统计数据 */
 const stats = reactive({
@@ -145,6 +189,17 @@ const stats = reactive({
     rated_count: 0,
     like_rate: 0,
     bad_kb_data: []
+  },
+  cache_stats: {
+    enabled: true,
+    l2_available: true,
+    l1_hit: 0,
+    l2_hit: 0,
+    miss: 0,
+    total: 0,
+    hit_rate: 0,
+    l1_size: 0,
+    l1_maxsize: 0
   }
 })
 
@@ -296,6 +351,19 @@ onBeforeUnmount(() => {
   font-weight: 600;
   font-size: 15px;
   color: #303133;
+}
+
+/* 卡片标题右侧的补充说明，用于澄清统计口径 */
+.card-hint {
+  margin-left: 10px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.cache-warning {
+  margin-top: 14px;
+  font-size: 12px;
+  color: #e6a23c;
 }
 
 .chart-box {

@@ -66,7 +66,31 @@ class Config:
     EMBED_MAX_RETRIES = 3   # 嵌入失败最大重试次数
 
     # RAG检索配置
-    RETRIEVER_TOP_K = 4     # 检索返回的相似文档数量
+    RETRIEVER_TOP_K = 4     # 检索返回的相似文档数量（分片内 k 与全局 k 都用它，见 services/vector_service.search）
+
+    # 索引分片配置
+    # 每个知识库按 doc_id 的稳定哈希拆成 SHARD_COUNT 个 collection（kb_{id}_shard_{n}），
+    # 避免单个 collection 无上界增长，并让写入可以按分片并行。
+    # 注意：改动该值只影响"新写入"落在哪个分片，读取始终遍历全部分片，因此调大/调小都是读安全的。
+    SHARD_COUNT = int(os.environ.get('SHARD_COUNT', 3))
+    # 是否兼容改造前的单 collection（kb_{id}）。线上存量向量都还在 legacy collection 里，
+    # 关掉它会让这些文档检索不到，除非先把存量数据迁移完。
+    SHARD_READ_LEGACY = os.environ.get('SHARD_READ_LEGACY', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+
+    # 向量化后台任务配置
+    # 上传接口只负责落盘入库，向量化交给后台线程池，避免大文件把请求拖到超时。
+    # 默认 1 个 worker：串行写入便于排查问题，也避免同时压 Ollama。
+    VECTOR_WORKERS = int(os.environ.get('VECTOR_WORKERS', 1))
+    VECTOR_QUEUE_SIZE = int(os.environ.get('VECTOR_QUEUE_SIZE', 100))
+
+    # LLM答案缓存配置（两级：进程内LRU + MySQL持久层）
+    # 知识库问答的提问重复度很高，命中缓存时无需再走向量检索和LLM生成。
+    CACHE_ENABLED = os.environ.get('CACHE_ENABLED', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+    CACHE_L1_MAXSIZE = int(os.environ.get('CACHE_L1_MAXSIZE', 500))
+    # L1必须不大于L2：从L2提升到L1时以L2的过期时间为上界，否则L1会比它的来源活得更久。
+    # L1是进程内缓存，清不掉其他进程的那一份，靠这个较短的TTL兜底。
+    CACHE_L1_TTL = int(os.environ.get('CACHE_L1_TTL', 120))
+    CACHE_L2_TTL = int(os.environ.get('CACHE_L2_TTL', 3600))
 
     # LLM生成参数
     # qwen3.5 是思考型模型，开着思考有两个问题：

@@ -12,6 +12,7 @@ from models.document import Document
 from models.chat_history import ChatHistory
 from utils.auth import admin_required
 from utils.response import success
+from services.cache_service import get_cache_service
 
 # 创建统计蓝图
 stats_bp = Blueprint('stats', __name__)
@@ -22,7 +23,10 @@ stats_bp = Blueprint('stats', __name__)
 def overview():
     """
     获取首页统计概览数据（仅管理员）
-    返回: 用户数、知识库数、文档数、今日提问数、近7天趋势、知识库文档占比
+    返回: 用户数、知识库数、文档数、今日提问数、近7天趋势、知识库文档占比、缓存命中统计
+
+    注意：cache_stats 中的命中率是"本进程自启动以来"的统计。被刻意排除不缓存的答案
+    （兜底文案、空答案）在缓存表里不留行，未命中的分母无法从表中还原，只能由进程内计数提供。
     """
     # 基础统计数量
     user_count = User.query.filter_by(status=1).count()
@@ -94,5 +98,6 @@ def overview():
             'rated_count': rated_count,
             'like_rate': like_rate,
             'bad_kb_data': [{'name': name, 'value': count} for name, count in bad_kb_stats]
-        }
+        },
+        'cache_stats': get_cache_service().stats()
     })

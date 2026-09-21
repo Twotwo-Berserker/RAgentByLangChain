@@ -10,7 +10,8 @@ from models.document import Document
 from models.knowledge_base import KnowledgeBase
 from utils.auth import login_required, admin_required
 from utils.response import success, error, page_response
-from services.vector_service import get_vector_service, OllamaServiceError
+from services.vector_service import get_vector_service
+from services.task_queue import submit_vectorize, get_progress
 
 
 # 创建文档蓝图
@@ -49,8 +50,9 @@ def get_list():
 @admin_required
 def upload():
     """
-    上传文档并进行向量化处理（仅管理员）
+    上传文档并提交后台向量化（仅管理员）
     表单参数: file（文件）, kb_id（知识库ID）
+    接口立即返回，向量化在后台线程池进行，处理进度通过 GET /<doc_id> 查询
     """
     if 'file' not in request.files:
         return error('请选择要上传的文件')
@@ -81,47 +83,45 @@ def upload():
     # 获取文件大小
     file_size = os.path.getsize(file_path)
 
-    # 创建文档记录
+    # 创建文档记录，状态为处理中
     doc = Document(
         kb_id=kb_id,
         file_name=file.filename,
         file_path=file_path,
         file_size=file_size,
         file_type=file_ext,
+        status='uploading',
         creator_id=g.user_id
     )
     db.session.add(doc)
+    # 必须先提交再投递任务：worker用的是独立会话，看不见未提交的行；
+    # 而且本请求未结束的事务还会持有行锁，让worker的更新一直等到锁超时
     db.session.commit()
 
-    # 进行文档向量化处理
-    try:
-        vector_service = get_vector_service()
-        chunk_count = vector_service.process_document(doc.id, file_path, file_ext, kb_id)
-
-        # 更新文档状态
-        doc.status = 'vectorized'
-        doc.chunk_count = chunk_count
-
-        # 更新知识库文档计数
-        kb.doc_count = Document.query.filter_by(kb_id=kb_id, status='vectorized').count()
-        db.session.commit()
-    except OllamaServiceError as e:
+    # 提交后台向量化（非阻塞）
+    app = current_app._get_current_object()
+    if not submit_vectorize(app, doc.id, file_path, file_ext, kb_id):
         doc.status = 'failed'
         db.session.commit()
-        return error(str(e))
-    except ConnectionError:
-        doc.status = 'failed'
-        db.session.commit()
-        return error('无法连接Ollama服务，请确认Ollama已启动并可访问')
-    except Exception as e:
-        doc.status = 'failed'
-        db.session.commit()
-        err_msg = str(e)
-        if 'status code' in err_msg:
-            return error(f'Ollama服务处理异常，请检查Ollama运行状态和系统资源: {err_msg}')
-        return error(f'文档向量化失败: {err_msg}')
+        return error('向量化队列已满，请稍后重试')
 
-    return success(doc.to_dict(), '上传成功')
+    return success(doc.to_dict(), '上传成功，正在后台处理')
+
+
+@doc_bp.route('/<int:doc_id>', methods=['GET'])
+@admin_required
+def get_detail(doc_id):
+    """
+    获取单个文档的处理状态与向量化进度（仅管理员）
+    供前端在上传后轮询，直到状态不再是 uploading
+    """
+    doc = Document.query.get(doc_id)
+    if not doc:
+        return error('文档不存在', 404)
+
+    data = doc.to_dict()
+    data['progress'] = get_progress(doc_id)
+    return success(data)
 
 
 @doc_bp.route('/<int:doc_id>', methods=['DELETE'])
@@ -137,26 +137,27 @@ def delete(doc_id):
 
     kb_id = doc.kb_id
 
-    # 删除向量数据
+    # 删除向量数据（遍历该知识库的全部分片与遗留collection）
     try:
         vector_service = get_vector_service()
-        vector_service.delete_document(doc.id, kb_id)
-    except Exception:
-        pass
+        deleted = vector_service.delete_document(doc.id, kb_id)
+        current_app.logger.info(f'文档{doc_id}已删除{deleted}个向量分块')
+    except Exception as e:
+        # 向量删除失败不应阻塞文档本身的下线，但必须留下日志便于排查残留
+        current_app.logger.warning(f'删除文档{doc_id}的向量数据失败: {e}')
 
     # 删除物理文件
-    if os.path.exists(doc.file_path):
+    if doc.file_path and os.path.exists(doc.file_path):
         os.remove(doc.file_path)
 
     # 删除数据库记录
     db.session.delete(doc)
 
     # 更新知识库文档计数
+    # 注意：这里不能再减1——上面的 delete 会在查询前自动flush，count() 已经把本行排除掉了
     kb = KnowledgeBase.query.get(kb_id)
     if kb:
-        kb.doc_count = Document.query.filter_by(kb_id=kb_id, status='vectorized').count() - 1
-        if kb.doc_count < 0:
-            kb.doc_count = 0
+        kb.doc_count = Document.query.filter_by(kb_id=kb_id, status='vectorized').count()
 
     db.session.commit()
     return success(message='删除成功')

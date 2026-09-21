@@ -46,11 +46,14 @@ def ask():
     # 调用RAG服务进行问答（单例复用，避免重复初始化）
     try:
         rag_service = get_rag_service()
-        answer, source_docs = rag_service.ask(question, kb_id)
+        result = rag_service.ask(question, kb_id)
     except Exception as e:
         return error(f'问答服务异常: {str(e)}')
 
-    # 保存对话记录
+    answer = result['answer']
+    source_docs = result['source_docs']
+
+    # 保存对话记录（命中缓存的问答同样留痕，否则历史里会缺记录）
     chat = ChatHistory(
         user_id=g.user_id,
         kb_id=kb_id,
@@ -66,7 +69,8 @@ def ask():
         'answer': answer,
         'source_docs': source_docs,
         'session_id': session_id,
-        'chat_id': chat.id
+        'chat_id': chat.id,
+        'from_cache': result['from_cache']
     })
 
 
@@ -107,15 +111,20 @@ def ask_stream():
     def generate():
         answer_parts = []
         source_docs = []
+        from_cache = False
         try:
             for event in rag_service.stream(question, kb_id):
+                if event['type'] == 'cache':
+                    # 内部事件，仅用于标记来源，不转发给前端
+                    from_cache = bool(event['data'])
+                    continue
                 if event['type'] == 'sources':
                     source_docs = event['data']
                 elif event['type'] == 'token':
                     answer_parts.append(event['data'])
                 yield json.dumps(event, ensure_ascii=False) + '\n'
 
-            # 流式结束后保存对话记录
+            # 流式结束后保存对话记录（命中缓存的问答同样留痕）
             answer = ''.join(answer_parts)
             chat = ChatHistory(
                 user_id=user_id,
@@ -134,7 +143,8 @@ def ask_stream():
                     'answer': answer,
                     'source_docs': source_docs,
                     'session_id': session_id,
-                    'chat_id': chat.id
+                    'chat_id': chat.id,
+                    'from_cache': from_cache
                 }
             }, ensure_ascii=False) + '\n'
         except Exception as e:

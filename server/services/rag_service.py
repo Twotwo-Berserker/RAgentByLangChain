@@ -10,6 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from services.vector_service import get_vector_service
+from services.cache_service import get_cache_service
 
 
 # RAG系统提示词模板
@@ -81,6 +82,7 @@ class RAGService:
         think = current_app.config.get('LLM_THINK')
         self.llm = model.bind(think=think) if think is not None else model
         self.vector_service = get_vector_service()
+        self.cache = get_cache_service()
 
         # 提示词模板只构建一次
         self.prompt = ChatPromptTemplate.from_messages([
@@ -136,32 +138,48 @@ class RAGService:
 
     def retrieve(self, question, kb_id):
         """
-        向量检索相关文档
+        向量检索相关文档（跨分片检索并归并）
         :param question: 用户问题
         :param kb_id: 知识库ID
         :return: 检索到的文档列表
         """
-        retriever = self.vector_service.get_retriever(kb_id)
-        return retriever.invoke(question)
+        return self.vector_service.search(kb_id, question)
+
+    def _cache_put(self, kb_id, question, answer, source_docs):
+        """
+        写入答案缓存。
+        兜底文案不代表知识库里的确定答案，缓存它们只会让"知识库没有这条信息"
+        这个结论被固化下来，因此一律不缓存。
+        :return: 是否写入成功
+        """
+        if answer in (NO_RESULT_ANSWER, EMPTY_ANSWER_FALLBACK):
+            return False
+        return self.cache.put(kb_id, question, answer, source_docs)
 
     def ask(self, question, kb_id):
         """
         RAG问答主方法（非流式）
-        流程: 用户提问 -> 向量检索 -> 构建上下文 -> LLM生成回答
+        流程: 查缓存 -> (未命中) 向量检索 -> 构建上下文 -> LLM生成回答 -> 回写缓存
         :param question: 用户问题
         :param kb_id: 知识库ID
-        :return: (回答文本, 参考来源列表)
+        :return: {'answer': 回答文本, 'source_docs': 来源列表, 'from_cache': 是否命中缓存}
         """
+        cached = self.cache.get(kb_id, question)
+        if cached is not None:
+            answer, source_docs = cached
+            return {'answer': answer, 'source_docs': source_docs, 'from_cache': True}
+
         docs = self.retrieve(question, kb_id)
 
         if not docs:
-            return NO_RESULT_ANSWER, []
+            return {'answer': NO_RESULT_ANSWER, 'source_docs': [], 'from_cache': False}
 
         answer = self._build_chain(docs).invoke(question)
         answer = self._guard_empty_answer(answer, question, kb_id)
         source_docs = self._extract_source_docs(docs)
 
-        return answer, source_docs
+        self._cache_put(kb_id, question, answer, source_docs)
+        return {'answer': answer, 'source_docs': source_docs, 'from_cache': False}
 
     def _guard_empty_answer(self, answer, question, kb_id):
         """
@@ -183,11 +201,20 @@ class RAGService:
     def stream(self, question, kb_id):
         """
         RAG流式问答，逐个产出事件字典：
+        - {'type': 'cache', 'data': True}     命中缓存（仅内部使用，不转发给前端）
         - {'type': 'sources', 'data': [...]}  参考来源（首条）
         - {'type': 'token', 'data': '...'}    LLM生成片段
         :param question: 用户问题
         :param kb_id: 知识库ID
         """
+        cached = self.cache.get(kb_id, question)
+        if cached is not None:
+            answer, source_docs = cached
+            yield {'type': 'cache', 'data': True}
+            yield {'type': 'sources', 'data': source_docs}
+            yield {'type': 'token', 'data': answer}
+            return
+
         docs = self.retrieve(question, kb_id)
 
         if not docs:
@@ -195,7 +222,8 @@ class RAGService:
             yield {'type': 'token', 'data': NO_RESULT_ANSWER}
             return
 
-        yield {'type': 'sources', 'data': self._extract_source_docs(docs)}
+        source_docs = self._extract_source_docs(docs)
+        yield {'type': 'sources', 'data': source_docs}
 
         answer_parts = []
         for chunk in self._build_chain(docs).stream(question):
@@ -207,3 +235,7 @@ class RAGService:
         fallback = self._guard_empty_answer(answer, question, kb_id)
         if fallback != answer:
             yield {'type': 'token', 'data': fallback}
+            answer = fallback
+
+        # 生成完成后回写缓存。放在这里而不是开头：中途出错或客户端断开时不应留下半截答案
+        self._cache_put(kb_id, question, answer, source_docs)

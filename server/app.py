@@ -42,9 +42,21 @@ def create_app():
     app.register_blueprint(user_bp, url_prefix='/api/user')
     app.register_blueprint(stats_bp, url_prefix='/api/stats')
 
+    # 恢复上次进程退出时卡在 uploading 的文档（延迟导入，避免顶层引入服务层）
+    # 恢复失败不应阻断服务启动：数据库暂时不可达时，服务照常起来并提供（能提供的）接口，
+    # 否则会因为一次数据库抖动而完全无法启动，问题反而更难定位
+    try:
+        from services.task_queue import recover_pending_documents
+        recover_pending_documents(app)
+    except Exception as e:
+        app.logger.warning(f'启动恢复未完成任务失败（不影响服务启动）: {e}')
+
     return app
 
 
 if __name__ == '__main__':
     app = create_app()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # use_reloader=False 是必须的：reloader 会再 fork 一个进程，
+    # 导致线程池、VectorService 单例、L1 缓存各存在两份，并且两个进程同时写同一个
+    # chroma_data/chroma.sqlite3。注意不能用 app.debug 来判断——debug 是 app.run() 才施加的。
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)

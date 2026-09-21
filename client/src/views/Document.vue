@@ -43,10 +43,10 @@
           </template>
         </el-table-column>
         <el-table-column prop="chunk_count" label="分块数" width="80" align="center" />
-        <el-table-column prop="status" label="状态" width="100" align="center">
+        <el-table-column prop="status" label="状态" width="120" align="center">
           <template #default="{ row }">
             <el-tag :type="statusMap[row.status]?.type" size="small">
-              {{ statusMap[row.status]?.label }}
+              {{ statusText(row) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -116,10 +116,10 @@
  * 文档管理页面
  * 支持按知识库筛选文档、上传新文档和删除文档
  */
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Upload } from '@element-plus/icons-vue'
-import { getDocList, uploadDoc, deleteDoc } from '../api/document'
+import { getDocList, uploadDoc, deleteDoc, getDocStatus } from '../api/document'
 import { getAllKB } from '../api/knowledge'
 
 const loading = ref(false)
@@ -132,6 +132,15 @@ const uploadKbId = ref(null)
 const uploadRef = ref(null)
 const fileList = ref([])
 
+/** 向量化进度：doc_id -> { done, total, stage } */
+const progressMap = reactive({})
+
+/** 轮询配置：向量化在后台进行，需要轮询状态直到不再有"处理中"的文档 */
+const POLL_INTERVAL = 2000
+const MAX_POLL_ATTEMPTS = 150
+let pollTimer = null
+let pollAttempts = 0
+
 /** 查询参数 */
 const queryParams = reactive({ page: 1, page_size: 10, kb_id: null })
 
@@ -140,6 +149,18 @@ const statusMap = {
   uploading: { label: '处理中', type: 'warning' },
   vectorized: { label: '已就绪', type: 'success' },
   failed: { label: '失败', type: 'danger' }
+}
+
+/** 状态列文案：处理中的文档带上向量化进度 */
+function statusText(row) {
+  if (row.status !== 'uploading') {
+    return statusMap[row.status]?.label ?? row.status
+  }
+  const progress = progressMap[row.id]
+  if (!progress || !progress.total) {
+    return '处理中'
+  }
+  return `处理中 ${progress.done}/${progress.total}`
 }
 
 /** 格式化文件大小 */
@@ -167,6 +188,58 @@ async function loadList() {
   }
 }
 
+/** 是否还有文档在后台处理 */
+function hasProcessing(rows = tableData.value) {
+  return rows.some(row => row.status === 'uploading')
+}
+
+/** 拉取处理中文档的向量化进度 */
+async function refreshProgress() {
+  const pending = tableData.value.filter(row => row.status === 'uploading')
+  await Promise.all(pending.map(async row => {
+    try {
+      const res = await getDocStatus(row.id)
+      progressMap[row.id] = res.data.progress
+    } catch (err) {
+      // 单次进度查询失败不影响轮询主流程
+    }
+  }))
+}
+
+/** 轮询期间的静默刷新：不动 loading，避免表格每2秒闪一次 */
+async function refreshQuietly() {
+  const res = await getDocList(queryParams)
+  tableData.value = res.data.list
+  total.value = res.data.total
+}
+
+/** 停止轮询 */
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+  pollAttempts = 0
+}
+
+/**
+ * 启动状态轮询。
+ * 上传接口现在立即返回、向量化在后台进行，因此必须轮询才能看到状态变化；
+ * 同时设有次数上限，避免后台异常时无限轮询。
+ */
+function startPolling() {
+  if (pollTimer) return
+  pollAttempts = 0
+  pollTimer = setInterval(async () => {
+    pollAttempts += 1
+    await refreshQuietly()
+    await refreshProgress()
+    if (!hasProcessing() || pollAttempts >= MAX_POLL_ATTEMPTS) {
+      stopPolling()
+    }
+  }, POLL_INTERVAL)
+}
+
 /** 处理文档上传 */
 async function handleUpload() {
   if (!uploadKbId.value) {
@@ -183,10 +256,14 @@ async function handleUpload() {
   uploading.value = true
   try {
     await uploadDoc(formData)
-    ElMessage.success('上传成功')
+    ElMessage.success('上传成功，正在后台向量化')
     uploadVisible.value = false
     fileList.value = []
-    loadList()
+    await loadList()
+    // 只要列表里还有"处理中"的文档就开轮询
+    if (hasProcessing()) {
+      startPolling()
+    }
   } finally {
     uploading.value = false
   }
@@ -196,13 +273,20 @@ async function handleUpload() {
 async function handleDelete(id) {
   await deleteDoc(id)
   ElMessage.success('删除成功')
-  loadList()
+  delete progressMap[id]
+  await loadList()
 }
 
-onMounted(() => {
+onMounted(async () => {
   loadKBOptions()
-  loadList()
+  await loadList()
+  // 覆盖"上传后刷新页面"的场景：此时后台可能仍在处理
+  if (hasProcessing()) {
+    startPolling()
+  }
 })
+
+onBeforeUnmount(stopPolling)
 </script>
 
 <style scoped>
