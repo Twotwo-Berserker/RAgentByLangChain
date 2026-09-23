@@ -41,6 +41,9 @@ class OllamaServiceError(Exception):
 _vector_service_instance = None
 _vector_service_lock = threading.Lock()
 
+# 分页读取分块（iter_chunks）时每页的条数
+CHUNK_PAGE_SIZE = 500
+
 
 def get_vector_service():
     """
@@ -265,6 +268,70 @@ class VectorService:
     # ------------------------------------------------------------------
     # 检索
     # ------------------------------------------------------------------
+
+    def iter_chunks(self, kb_id, page_size=None):
+        """
+        分页遍历该知识库的全部分块（遗留collection + 全部分片），
+        供词法索引(BM25)这类需要全量语料的场景使用。
+
+        用 limit/offset 分页而不是一次 get()：Chroma 的 get 会把命中的文档与元数据
+        一次性物化到内存，小库上无所谓，语料增长后单次响应体会同步膨胀；分页让峰值
+        内存与语料规模解耦。
+
+        两点使用约束：
+        1. 这是生成器，异常在迭代时才抛出，调用方必须在 for 循环外做 try/except；
+        2. **不按 id 去重**——迁移期为兼容存量数据，同一分块可能同时存在于遗留
+           collection 与分片里，两处都会产出。调用方必须自己按 id 去重，
+           否则同一分块会占两个候选位，语料总数与文档频率也会偏大。
+
+        :param kb_id: 知识库ID
+        :param page_size: 每页条数
+        :return: 生成器，逐条产出 (chunk_id, 正文, 元数据)
+        """
+        page_size = max(1, int(page_size or CHUNK_PAGE_SIZE))
+
+        for store in self._get_stores(kb_id):
+            collection = store._collection
+            name = collection.name
+            try:
+                total = collection.count()
+            except Exception as e:
+                current_app.logger.warning(f'读取分块总数失败已跳过(collection={name}): {e}')
+                continue
+
+            offset = 0
+            while offset < total:
+                try:
+                    # include 必须显式带上 documents：ids 总是返回，但正文不会顺带
+                    # 带出。绝不请求 embeddings——那会把整库向量拉进内存
+                    res = collection.get(
+                        limit=page_size,
+                        offset=offset,
+                        include=['documents', 'metadatas']
+                    )
+                except Exception as e:
+                    # 单个分片异常不能中断整库的语料收集，已取到的部分照常使用
+                    current_app.logger.warning(
+                        f'分页读取分块失败已跳过(collection={name}): {e}'
+                    )
+                    break
+
+                ids = res.get('ids') or []
+                if not ids:
+                    break
+                documents = res.get('documents') or []
+                metadatas = res.get('metadatas') or []
+                for i, chunk_id in enumerate(ids):
+                    text = documents[i] if i < len(documents) else None
+                    if not text:
+                        continue
+                    metadata = metadatas[i] if i < len(metadatas) else None
+                    yield chunk_id, text, metadata or {}
+
+                # 用实际返回条数推进：分页不是快照，期间可能有并发写入，
+                # 按 page_size 推进会在短页时漏读。最坏情况是某次查询看到部分语料，
+                # 而写入方的 invalidate() 会触发下一次重建
+                offset += len(ids)
 
     def search(self, kb_id, question, top_k=None):
         """
@@ -534,6 +601,15 @@ class VectorService:
         """
         with self._store_lock:
             self._store_cache.pop(kb_id, None)
+
+        try:
+            # 局部导入：bm25_service 顶层依赖本模块（要调 iter_chunks 建语料），
+            # 模块级互相导入会成环。本方法也是词法索引唯一的失效入口
+            from services.bm25_service import get_bm25_service
+            get_bm25_service().invalidate(kb_id)
+        except Exception as e:
+            # 词法索引失效失败不应影响文档处理本身（与下面清理答案缓存同样对待）
+            current_app.logger.warning(f'词法索引失效失败(kb_id={kb_id}): {e}')
 
         try:
             get_cache_service().purge_kb(kb_id)

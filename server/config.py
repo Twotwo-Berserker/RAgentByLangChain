@@ -44,6 +44,33 @@ def _parse_think(value):
     return v in ('1', 'true', 'yes', 'on')
 
 
+def _env_bool(name, default):
+    """
+    读取布尔型环境变量
+    :param name: 环境变量名
+    :param default: 默认值
+    :return: 解析后的布尔值
+    """
+    return os.environ.get(name, str(default)).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _env_int(name, default):
+    """
+    读取整型环境变量。值非法时回落到默认值而不是抛异常——
+    一个拼错的数字不该导致服务起不来。
+    :param name: 环境变量名
+    :param default: 默认值
+    :return: 解析后的整数
+    """
+    raw = (os.environ.get(name) or '').strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 class Config:
     """基础配置类"""
 
@@ -94,6 +121,55 @@ class Config:
     # RAG检索配置
     RETRIEVER_TOP_K = 4     # 检索返回的相似文档数量（分片内 k 与全局 k 都用它，见 services/vector_service.search）
 
+    # ------------------------------------------------------------------
+    # 混合检索 / 多路召回 / 重排序
+    #
+    # 检索链路：查询改写 → 多路召回（向量 × N + BM25 × 1）→ RRF 融合 → 重排 → 取 RETRIEVER_TOP_K
+    # 最终返回条数仍是 RETRIEVER_TOP_K，因此提示词长度与生成阶段的开销结构不变。
+    #
+    # 延迟提醒：重排与改写各是一次额外的 LLM 调用，是本项目新增的主要成本。
+    # 三个 *_ENABLED 开关必须保持独立可用——现场演示卡顿时按需关掉即可降级，
+    # 每个环节失败也都只降级、不报错（见 services/hybrid_retriever.py）。
+    # ------------------------------------------------------------------
+
+    # 混合检索总开关。关掉即退回改造前的纯向量检索，行为与旧版完全一致
+    HYBRID_ENABLED = _env_bool('HYBRID_ENABLED', True)
+
+    # 每一路召回的候选条数。必须明显大于 RETRIEVER_TOP_K，否则多路融合没有候选可用
+    RECALL_TOP_K = _env_int('RECALL_TOP_K', 20)
+
+    # RRF平滑常数。注意本项目召回列表只有 RECALL_TOP_K 条，k=60 时 rank1 与 rank20 的
+    # 得分比仅约1.3倍，融合结果接近"被几路同时命中"的投票（共识即相关，是安全的选择）；
+    # 想更看重单路名次可以调到 20 左右
+    RRF_K = _env_int('RRF_K', 60)
+
+    # BM25 中文切分方式：
+    #   char  - 单字 + 相邻双字（默认）。"带薪年假" 会产出 带薪/薪年/年假，
+    #           查询"年假"能以二元组精确命中，对词频统计已足够，且不引入分词库依赖
+    #   jieba - 装了 jieba 才生效，用于对比效果
+    BM25_TOKENIZER = os.environ.get('BM25_TOKENIZER', 'char').strip().lower()
+
+    # 查询改写：短问题几乎没有可用检索线索，此时才值得多付一次 LLM 调用。
+    # 阈值定在8而不是12，是因为中文问题信息密度高：「员工每年有多少天带薪年假」正好
+    # 12个字却已经是个完整无歧义的问题，改写它纯属白花1~3秒；而「年假」「报销流程」
+    # 这类短问题才是真正需要补全关键词的。这个值是最值得按语料实际效果微调的参数
+    QUERY_REWRITE_ENABLED = _env_bool('QUERY_REWRITE_ENABLED', True)
+    QUERY_REWRITE_COUNT = _env_int('QUERY_REWRITE_COUNT', 2)       # 改写条数；每多一条多一次嵌入往返
+    QUERY_REWRITE_MAX_CHARS = _env_int('QUERY_REWRITE_MAX_CHARS', 8)
+
+    # 重排序
+    RERANK_ENABLED = _env_bool('RERANK_ENABLED', True)
+    RERANK_BACKEND = os.environ.get('RERANK_BACKEND', 'llm').strip().lower()   # llm | cross_encoder | none
+    # 留空复用 OLLAMA_LLM_MODEL：同一个模型不会触发 Ollama 重新加载
+    RERANK_MODEL = os.environ.get('RERANK_MODEL', '').strip()
+    # 送进重排的候选数。12×300字≈4k字，落在 LLM_NUM_CTX=8192 内
+    RERANK_TOP_N = _env_int('RERANK_TOP_N', 12)
+    # 每个候选在重排提示词里的截断长度。不截断的话长上下文会把重排拖慢甚至挤爆 num_ctx
+    RERANK_CANDIDATE_CHARS = _env_int('RERANK_CANDIDATE_CHARS', 300)
+    # 重排/改写这类请求路径上的辅助调用超时（秒）。
+    # 绝不能沿用 LLM_TIMEOUT 那个 3600——辅助调用一多，Ollama 卡死时用户要等满一小时
+    RETRIEVAL_LLM_TIMEOUT = _env_int('RETRIEVAL_LLM_TIMEOUT', 60)
+
     # 索引分片配置
     # 每个知识库按 doc_id 的稳定哈希拆成 SHARD_COUNT 个 collection（kb_{id}_shard_{n}），
     # 避免单个 collection 无上界增长，并让写入可以按分片并行。
@@ -133,3 +209,8 @@ class Config:
     #      （实测思考会吃掉 1200~3500 个 token），否则正文会被截断成空
     LLM_NUM_CTX = int(os.environ.get('LLM_NUM_CTX', 8192))
     LLM_NUM_PREDICT = int(os.environ.get('LLM_NUM_PREDICT', 2048))
+
+    # 生成答案的请求超时（秒）。本地模型在长文档上生成很慢，故取得很长；
+    # 但**不能设成无限**——Ollama 卡死时请求会一直挂着，只能靠重启服务恢复。
+    # 请求路径上的辅助调用（重排/改写）另见 RETRIEVAL_LLM_TIMEOUT，那个必须是短超时。
+    LLM_TIMEOUT = _env_int('LLM_TIMEOUT', 3600)

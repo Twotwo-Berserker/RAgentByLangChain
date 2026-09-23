@@ -11,6 +11,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from services.vector_service import get_vector_service
 from services.cache_service import get_cache_service
+from services.hybrid_retriever import get_hybrid_retriever
 
 
 # RAG系统提示词模板
@@ -74,7 +75,12 @@ class RAGService:
             temperature=0.3,
             num_ctx=current_app.config['LLM_NUM_CTX'],
             num_predict=current_app.config['LLM_NUM_PREDICT'],
-            timeout=3600
+            # **超时只能走 client_kwargs 传**：ChatOllama 没有声明 timeout 字段，
+            # 而它的 model_config 是 extra='ignore'，所以直接写 timeout=3600 会被
+            # pydantic 静默丢弃（实测拿到的 httpx 超时是 Timeout(timeout=None)，
+            # 即永不超时），只有 client_kwargs 才会被 Client(host=..., **client_kwargs)
+            # 真正透传下去
+            client_kwargs={'timeout': current_app.config.get('LLM_TIMEOUT', 3600)}
         )
         # think 透传给 Ollama：关闭思考后同一个问题从 203s 降到 6s，
         # 也不再出现"思考吃掉全部预算、正文为空"的空白回答。
@@ -83,6 +89,11 @@ class RAGService:
         self.llm = model.bind(think=think) if think is not None else model
         self.vector_service = get_vector_service()
         self.cache = get_cache_service()
+        # 混合检索（多路召回 + RRF + 重排）。关掉 HYBRID_ENABLED 即为改造前的纯向量检索。
+        # 注意 vector_service 必须保留——它同时是混合检索失败时的回退路径
+        self.hybrid = (
+            get_hybrid_retriever() if current_app.config.get('HYBRID_ENABLED', True) else None
+        )
 
         # 提示词模板只构建一次
         self.prompt = ChatPromptTemplate.from_messages([
@@ -138,11 +149,23 @@ class RAGService:
 
     def retrieve(self, question, kb_id):
         """
-        向量检索相关文档（跨分片检索并归并）
+        检索相关文档：混合检索（多路召回 → RRF 融合 → 重排）。
+        任何异常都回退到纯向量检索——HybridRetriever 内部已对改写/词法/重排各自兜底，
+        这里兜的是意料之外的故障，检索优化出问题绝不能把整个问答搞挂。
+
+        返回契约与改造前完全一致：按相关程度降序、至多 RETRIEVER_TOP_K 条。
+        _format_docs 与 _extract_source_docs 因此无需任何改动，[来源N] 编号依然正确。
         :param question: 用户问题
         :param kb_id: 知识库ID
         :return: 检索到的文档列表
         """
+        if self.hybrid is not None:
+            try:
+                return self.hybrid.retrieve(question, kb_id)
+            except Exception as e:
+                current_app.logger.warning(
+                    f'混合检索失败，回退向量检索(kb_id={kb_id}): {e}'
+                )
         return self.vector_service.search(kb_id, question)
 
     def _cache_put(self, kb_id, question, answer, source_docs):
@@ -159,11 +182,15 @@ class RAGService:
     def ask(self, question, kb_id):
         """
         RAG问答主方法（非流式）
-        流程: 查缓存 -> (未命中) 向量检索 -> 构建上下文 -> LLM生成回答 -> 回写缓存
+        流程: 查缓存 -> (未命中) 混合检索 -> 构建上下文 -> LLM生成回答 -> 回写缓存
         :param question: 用户问题
         :param kb_id: 知识库ID
         :return: {'answer': 回答文本, 'source_docs': 来源列表, 'from_cache': 是否命中缓存}
         """
+        # 缓存检查必须排在检索之前：混合检索比纯向量多出改写与重排至少一次LLM往返，
+        # 一旦顺序颠倒，每次问答都要先白花掉这些调用才能发现答案早就在缓存里。
+        # 缓存键仍是(知识库, 归一化问题)——改写与重排都是(问题, 知识库内容)的确定性
+        # 函数，内容变化正好由 VectorService.invalidate() 负责清理
         cached = self.cache.get(kb_id, question)
         if cached is not None:
             answer, source_docs = cached

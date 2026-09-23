@@ -88,13 +88,43 @@ server/
 │   └── stats.py            #   /api/stats
 ├── services/               # 业务层
 │   ├── rag_service.py      #   RAG 问答链（检索→提示词→LLM→解析）
-│   └── vector_service.py   #   文档解析/分块/向量写入/删除/检索
+│   ├── hybrid_retriever.py #   混合检索编排（多路召回→RRF融合→重排）
+│   ├── vector_service.py   #   文档解析/分块/向量写入/删除/检索
+│   ├── bm25_service.py     #   BM25 词法索引（混合检索的稀疏一路）
+│   ├── reranker_service.py #   重排序（可插拔：llm / cross_encoder / none）
+│   ├── query_rewrite_service.py # 短问题查询改写（多路召回的来源）
+│   ├── retrieval_llm.py    #   检索辅助任务的 LLM 客户端工厂
+│   ├── cache_service.py    #   两级答案缓存（L1 进程内 + L2 MySQL）
+│   └── task_queue.py       #   向量化后台线程池（上传后异步处理）
 └── utils/
     ├── auth.py             #   密码哈希（argon2id，兼容存量MD5）+ JWT 生成校验 + login_required/admin_required 装饰器
     └── response.py         #   统一响应封装（success/error/page_response）
 ```
 
-分层约定：`routes`（HTTP 参数校验与鉴权）→ `services`（业务逻辑与 RAG 处理）→ `models`（ORM）。RAG 主流程见 [rag_service.py](services/rag_service.py) 的 `ask()`：向量检索 → 拼装上下文 → 提示词 → LLM 生成 → 提取引用来源；文档向量化与 Chroma 写入见 [vector_service.py](services/vector_service.py) 的 `process_document()`（含 Ollama 预检查与失败重试）。
+分层约定：`routes`（HTTP 参数校验与鉴权）→ `services`（业务逻辑与 RAG 处理）→ `models`（ORM）。RAG 主流程见 [rag_service.py](services/rag_service.py) 的 `ask()`：查缓存 → 混合检索 → 拼装上下文 → 提示词 → LLM 生成 → 提取引用来源；文档向量化与 Chroma 写入见 [vector_service.py](services/vector_service.py) 的 `process_document()`（含 Ollama 预检查与失败重试）。
+
+### 检索链路
+
+检索从「单路向量 top_k」升级为**多路召回 + 融合 + 重排**，由 [hybrid_retriever.py](services/hybrid_retriever.py) 编排：
+
+```
+问题 ─┬─ 查询改写(仅短问题) ─→ 每条改写各一路向量召回 ─┐
+      └─ 原问题 ─→ 向量召回 ────────────────────────┼─→ RRF 融合 ─→ 重排 ─→ top_k
+                    └─ BM25 词法召回 ────────────────┘
+```
+
+四个刻意的设计选择：
+
+| 选择 | 原因 |
+| --- | --- |
+| 融合用 RRF（只吃名次） | 向量返回的是距离（越小越好），BM25 返回的是相似度（越大越好），量纲不可比，任何归一化口径都站不住 |
+| 词法只跑原问题，不跑改写 | 改写句按定义换了词，恰是词法匹配最不擅长的；让近随机的列表参与投票只会把它的任意 top-N 抬进候选池 |
+| RRF 统一权重、不调参 | 加权只压低「仅被改写命中」的文档，而那正是改写想召回的那批。分工改为：RRF 保守地最大化召回，精确性交给重排 |
+| 重排输出「排列」而非分数 | 分数数组在候选数对不上时错位是**静默**的；排列可做集合校验，缺失项补在末尾，模型只能提前、不能丢弃 |
+
+中文切分不用分词库，按**相邻双字**（「带薪年假」→ 带薪/薪年/年假），且不保留单字——单字里混着大量虚词（与/的/和），文档频率极高、区分度近乎为零，实测会让「量子计算与航天器」仅因一个「与」字就把薪酬制度文档排到第一位。词法索引按知识库惰性构建、失效只递增版本号（`invalidate()` 实测 0.002ms），重建推迟到文档变更后的首次检索。
+
+重排是本次唯一显著的新增延迟（约 2~5 秒）。`HYBRID_ENABLED` / `RERANK_ENABLED` / `QUERY_REWRITE_ENABLED` 三个开关可独立关闭，且每个环节失败都只降级不报错：重排失败退回融合顺序、改写失败只用原问题，全部召回路径都失败才抛异常交给上层回退到纯向量检索。
 
 ## 主要接口
 
