@@ -28,6 +28,15 @@
    mysql --default-character-set=utf8mb4 -h127.0.0.1 -P3306 -uroot -p123456 < sql/init.sql
    ```
 
+4. 配置 `SECRET_KEY`（JWT 签名密钥，**必填**：未配置或长度不足 32 位时服务拒绝启动）：
+
+   ```bash
+   cp .env.example .env          # Windows cmd 用：copy .env.example .env
+   python -c "import secrets; print(secrets.token_urlsafe(48))"   # 填进 .env 的 SECRET_KEY=
+   ```
+
+   `server/.env` 已被 `.gitignore` 忽略；部署时请用真实环境变量注入。
+
 启动服务：
 
 ```bash
@@ -35,7 +44,27 @@ pip install -r requirements.txt
 python app.py        # 默认监听 0.0.0.0:5000
 ```
 
-所有连接配置（数据库、Ollama、Chroma 路径、分块/检索参数）均可在 [config.py](config.py) 中通过环境变量覆盖。
+其余连接配置（数据库、Ollama、Chroma 路径、分块/检索参数）均可在 [config.py](config.py) 中通过环境变量覆盖，完整的可覆盖项见 [.env.example](.env.example)。
+
+## 升级已有数据库
+
+已经按旧版 `init.sql` 建好库、不想重建数据的，按顺序执行 [sql/](sql/) 下的增量脚本，**不要**重跑 `init.sql`（它会 DROP 表）：
+
+| 脚本 | 用途 |
+| --- | --- |
+| `migrate_v2_feedback.sql` | 对话反馈字段 |
+| `migrate_v3_cache.sql` | 答案缓存表（L2） |
+| `migrate_v4_password.sql` | 密码列放宽到 `VARCHAR(255)`（配合 argon2 哈希） |
+
+```bash
+mysql --default-character-set=utf8mb4 -h127.0.0.1 -P3306 -uroot -p123456 < sql/migrate_v4_password.sql
+```
+
+> `migrate_v4_password.sql` 必须在部署新版代码**之前**执行。旧列宽 `VARCHAR(64)` 装不下约 97 字符的
+> argon2 哈希，先上代码后迁移会导致密码升级写入被截断或报 1406。
+>
+> 存量密码是无盐 MD5，无需手动处理：登录逻辑能识别并校验它，用户下次登录时自动改写为 argon2 哈希。
+> 查看升级进度：`SELECT COUNT(*) FROM t_user WHERE password NOT LIKE '$argon2id$%';`
 
 ## 代码架构
 
@@ -61,7 +90,7 @@ server/
 │   ├── rag_service.py      #   RAG 问答链（检索→提示词→LLM→解析）
 │   └── vector_service.py   #   文档解析/分块/向量写入/删除/检索
 └── utils/
-    ├── auth.py             #   JWT 生成校验 + login_required/admin_required 装饰器
+    ├── auth.py             #   密码哈希（argon2id，兼容存量MD5）+ JWT 生成校验 + login_required/admin_required 装饰器
     └── response.py         #   统一响应封装（success/error/page_response）
 ```
 

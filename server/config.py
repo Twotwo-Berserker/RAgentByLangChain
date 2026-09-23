@@ -4,6 +4,32 @@
 """
 import os
 
+from dotenv import load_dotenv
+
+
+# 提前加载 server/.env（该文件已被 .gitignore 忽略）：本地开发把 SECRET_KEY 等放在这里，
+# 部署时改用真实环境变量。不传 override=True，让已存在的环境变量优先于 .env 文件。
+# 必须放在 class Config 之前——Config 的类体在模块导入时求值，晚于此处就会读到空值。
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+
+
+def _require_secret_key():
+    """
+    读取并校验 SECRET_KEY
+    缺失或过短直接抛异常。宁可启动失败，也不能退回一个写死在源码里的默认密钥——
+    JWT的签名密钥一旦可猜，任何人都能自行签发任意 user_id/role 的token冒充管理员。
+    :return: 校验通过的密钥
+    """
+    key = (os.environ.get('SECRET_KEY') or '').strip()
+    # HS256的密钥长度应与摘要输出一致，即256位（32字节）
+    if len(key) < 32:
+        raise RuntimeError(
+            'SECRET_KEY 未配置或长度不足32位，拒绝启动。\n'
+            '请复制 server/.env.example 为 server/.env 并填入随机串，或通过环境变量注入。\n'
+            '生成方式：python -c "import secrets; print(secrets.token_urlsafe(48))"'
+        )
+    return key
+
 
 def _parse_think(value):
     """
@@ -21,8 +47,8 @@ def _parse_think(value):
 class Config:
     """基础配置类"""
 
-    # Flask密钥，用于JWT签名
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'enterprise-qa-secret-key-2024')
+    # Flask密钥，用于JWT签名。必填，无默认值（见 _require_secret_key）
+    SECRET_KEY = _require_secret_key()
 
     # MySQL数据库配置（端口3306，密码123456）
     MYSQL_HOST = os.environ.get('MYSQL_HOST', '127.0.0.1')

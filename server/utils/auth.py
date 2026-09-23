@@ -1,21 +1,75 @@
 """
 JWT认证工具
-提供Token生成、验证以及登录权限装饰器
+提供密码哈希、Token生成、验证以及登录权限装饰器
 """
-import jwt
+import hmac
+import re
 import hashlib
+import jwt
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import request, g, current_app
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
 
 
-def md5_encrypt(text):
+# argon2id 加盐哈希，用的是 argon2-cffi 的默认参数（m=64MiB, t=3, p=4），
+# 单次校验约几十毫秒——刻意让离线爆破变贵。哈希自带随机盐，同一明文两次结果不同。
+_password_hasher = PasswordHasher()
+
+# 改造前存量密码是无盐MD5（32位小写十六进制）。识别它只为登录时一次性升级成argon2，
+# 新写入的密码永远只走 hash_password()。
+_LEGACY_MD5_PATTERN = re.compile(r'[0-9a-f]{32}')
+
+
+def hash_password(password):
     """
-    MD5加密
+    对密码做argon2id加盐哈希
+    :param password: 原始密码
+    :return: argon2id哈希字符串（约97字符，含算法、参数与随机盐）
+    """
+    return _password_hasher.hash(password)
+
+
+def is_legacy_hash(stored):
+    """
+    判断存储的密码是否为改造前的无盐MD5哈希
+    :param stored: 数据库中存储的密码哈希
+    :return: 是MD5返回True，否则返回False
+    """
+    return isinstance(stored, str) and _LEGACY_MD5_PATTERN.fullmatch(stored) is not None
+
+
+def _legacy_md5_hex(text):
+    """
+    计算无盐MD5
+    仅用于校验存量数据，不得用于新增密码
     :param text: 原始字符串
     :return: MD5加密后的字符串
     """
     return hashlib.md5(text.encode('utf-8')).hexdigest()
+
+
+def verify_password(password, stored):
+    """
+    校验密码，兼容存量MD5哈希
+    :param password: 用户提交的原始密码
+    :param stored: 数据库中存储的密码哈希
+    :return: 校验通过返回True，否则返回False
+    """
+    # 存量MD5走单独分支。用compare_digest而非==，避免按字节提前返回的计时差异
+    if is_legacy_hash(stored):
+        return hmac.compare_digest(_legacy_md5_hex(password), stored)
+
+    # 脏数据（NULL、空串、被截断的旧哈希）必须返回False而不是抛异常，
+    # 否则库里一条坏数据就能把登录接口打成500。
+    # 注意 InvalidHashError 继承自 ValueError，与 VerificationError 不同源，两者都要接。
+    if not isinstance(stored, str):
+        return False
+    try:
+        return _password_hasher.verify(stored, password)
+    except (VerificationError, InvalidHashError):
+        return False
 
 
 def generate_token(user_id, role):

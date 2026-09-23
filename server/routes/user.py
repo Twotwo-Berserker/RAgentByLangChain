@@ -5,7 +5,7 @@
 from flask import Blueprint, request
 from models import db
 from models.user import User
-from utils.auth import admin_required, md5_encrypt
+from utils.auth import admin_required, hash_password
 from utils.response import success, error, page_response
 
 # 创建用户管理蓝图
@@ -79,7 +79,7 @@ def create():
 
     user = User(
         username=username,
-        password=md5_encrypt(password),
+        password=hash_password(password),
         nickname=nickname or username,
         role=role
     )
@@ -109,7 +109,7 @@ def update(user_id):
     if 'status' in data:
         user.status = data['status']
     if data.get('password'):
-        user.password = md5_encrypt(data['password'])
+        user.password = hash_password(data['password'])
 
     db.session.commit()
     return success(user.to_dict(), '更新成功')

@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- 用户登录 / JWT 鉴权，管理员与普通用户权限隔离
+- 用户登录 / JWT 鉴权，密码以 argon2id 加盐哈希存储，管理员与普通用户权限隔离
 - 知识库管理：创建、编辑、删除（逻辑删除）
 - 文档管理：上传（txt / pdf / md / docx）、解析分块、向量化、删除
 - RAG 智能问答：向量检索 + LLM 生成，流式输出（NDJSON），返回答案与引用来源
@@ -91,6 +91,20 @@ RAgentByLangChain/
    ```bash
    cd server
    pip install -r requirements.txt
+   ```
+
+   配置 `SECRET_KEY`（JWT 签名密钥）。**这是必填项**：未配置或长度不足 32 位时服务会直接拒绝启动，
+   不会退回任何写死在源码里的默认密钥——默认密钥一旦公开，等于任何人可自行签发管理员 token。
+
+   ```bash
+   cp .env.example .env          # Windows cmd 用：copy .env.example .env
+   # 生成一个随机密钥，把输出填进 .env 的 SECRET_KEY=
+   python -c "import secrets; print(secrets.token_urlsafe(48))"
+   ```
+
+   `server/.env` 已在 `.gitignore` 中，不会被提交；部署时请改用真实环境变量注入，不要分发该文件。
+
+   ```bash
    python app.py
    ```
 
@@ -117,7 +131,7 @@ RAgentByLangChain/
 
 ## 可优化方向
 
-- **鉴权安全**：密码改用 `bcrypt`/`argon2` 加盐哈希，替换当前 MD5；`SECRET_KEY` 强制从环境变量注入，避免硬编码。
+- **鉴权安全**：已完成密码 `argon2id` 加盐哈希（`SECRET_KEY` 强制环境变量注入）。
 - **检索质量**：引入混合检索（BM25 + 向量）、重排序（reranker）、查询改写与多路召回，提升答案准确率。
 - **文档解析**：补充表格、图片 OCR、扫描版 PDF 的解析能力，并支持更大规模文档的向量化（把线程池换成 Celery 队列以获得任务持久化与跨机扩展）。
 - **工程健壮性**：增加单元测试与接口测试、结构化日志、统一异常处理、数据库迁移工具（Alembic）与部署容器化（Docker Compose）。

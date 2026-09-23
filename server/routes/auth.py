@@ -2,9 +2,10 @@
 认证路由
 提供用户登录和获取用户信息接口
 """
-from flask import Blueprint, request, g
+from flask import Blueprint, request, g, current_app
+from models import db
 from models.user import User
-from utils.auth import md5_encrypt, generate_token, login_required
+from utils.auth import hash_password, is_legacy_hash, verify_password, generate_token, login_required
 from utils.response import success, error
 
 # 创建认证蓝图
@@ -33,13 +34,23 @@ def login():
     if not user:
         return error('用户名或密码错误')
 
-    # 验证密码（MD5加密后比对）
-    if user.password != md5_encrypt(password):
+    # 验证密码（argon2id 哈希比对，兼容存量的无盐MD5）
+    if not verify_password(password, user.password):
         return error('用户名或密码错误')
 
     # 检查用户状态
     if user.status != 1:
         return error('账号已被禁用，请联系管理员')
+
+    # 存量MD5密码：本次凭据已验证通过，就地升级为argon2id哈希，用户无感。
+    # 升级失败不应影响本次登录（密码已经验对了），记日志即可，下次登录会再试一次。
+    if is_legacy_hash(user.password):
+        try:
+            user.password = hash_password(password)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            current_app.logger.warning(f'用户{user.username}的密码哈希升级失败（不影响本次登录）: {e}')
 
     # 生成Token
     token = generate_token(user.id, user.role)

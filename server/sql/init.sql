@@ -24,7 +24,7 @@ DROP TABLE IF EXISTS t_user;
 CREATE TABLE t_user (
     id INT PRIMARY KEY AUTO_INCREMENT COMMENT '用户ID',
     username VARCHAR(50) NOT NULL UNIQUE COMMENT '用户名',
-    password VARCHAR(64) NOT NULL COMMENT '密码（MD5加密）',
+    password VARCHAR(255) NOT NULL COMMENT '密码（argon2id加盐哈希）',
     nickname VARCHAR(50) DEFAULT '' COMMENT '昵称',
     role VARCHAR(10) NOT NULL DEFAULT 'user' COMMENT '角色：admin-管理员，user-普通用户',
     avatar VARCHAR(255) DEFAULT '' COMMENT '头像地址',
@@ -109,12 +109,14 @@ CREATE TABLE t_answer_cache (
 -- 插入测试数据
 -- ============================================
 
--- 管理员账号: admin / 123456 (MD5加密)
+-- 管理员账号: admin / 123456 (argon2id加盐哈希)
 -- 普通用户: user1 / 123456, user2 / 123456
+-- 三个账号明文相同但哈希各异，因为argon2自带随机盐——这正是加盐的作用，
+-- 拖库后无法通过「哈希相同即密码相同」批量比对。
 INSERT INTO t_user (username, password, nickname, role, status) VALUES
-('admin', 'e10adc3949ba59abbe56e057f20f883e', '系统管理员', 'admin', 1),
-('user1', 'e10adc3949ba59abbe56e057f20f883e', '张三', 'user', 1),
-('user2', 'e10adc3949ba59abbe56e057f20f883e', '李四', 'user', 1);
+('admin', '$argon2id$v=19$m=65536,t=3,p=4$PsvdlgGui0XuOs2PEvD8lw$38+CTm4cqPJJTWMUap81K7lmZ4857VhcxFo/EO1adRA', '系统管理员', 'admin', 1),
+('user1', '$argon2id$v=19$m=65536,t=3,p=4$/1ix0yyYCFkhcWzIu+H4mQ$bzcl5O/831vpItvVMOiSaSvoBqHU38Skne/Mx6V1Bp4', '张三', 'user', 1),
+('user2', '$argon2id$v=19$m=65536,t=3,p=4$+d3Hji7ngMNyuLhRjs/OjQ$txGtFwigVRdd3lLLnAYf5Ow1NVBzxePdCGTTlBoK4uc', '李四', 'user', 1);
 
 -- 测试知识库
 INSERT INTO t_knowledge_base (kb_name, description, creator_id, doc_count, status) VALUES

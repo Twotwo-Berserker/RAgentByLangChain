@@ -13,7 +13,7 @@ class User(db.Model):
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True, comment='用户ID')
     username = db.Column(db.String(50), unique=True, nullable=False, comment='用户名')
-    password = db.Column(db.String(64), nullable=False, comment='密码（MD5加密）')
+    password = db.Column(db.String(255), nullable=False, comment='密码（argon2id加盐哈希）')
     nickname = db.Column(db.String(50), default='', comment='昵称')
     role = db.Column(db.String(10), nullable=False, default='user', comment='角色：admin/user')
     avatar = db.Column(db.String(255), default='', comment='头像地址')
