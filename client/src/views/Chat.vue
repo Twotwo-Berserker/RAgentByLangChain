@@ -44,7 +44,7 @@
       </div>
 
       <!-- 消息列表 -->
-      <div class="chat-messages" ref="messagesRef">
+      <div class="chat-messages" ref="messagesRef" @scroll.passive="onMessagesScroll">
         <div v-if="messages.length === 0" class="welcome">
           <el-icon :size="64" color="#c0c4cc"><ChatDotSquare /></el-icon>
           <h3>欢迎使用企业知识库问答系统</h3>
@@ -54,6 +54,7 @@
           v-for="(msg, i) in messages"
           :key="i"
           :message="msg"
+          :streaming="asking && i === messages.length - 1 && msg.role === 'ai'"
           @feedback="(value, comment) => handleFeedback(i, value, comment)"
         />
         <!-- 加载中提示 -->
@@ -65,6 +66,18 @@
           </div>
         </div>
       </div>
+
+      <!-- 上滑查看前文时不再把界面强行拉回底部，改由这个按钮回到最新 -->
+      <transition name="fade">
+        <el-button
+          v-if="!autoScroll && messages.length"
+          class="to-bottom-btn"
+          circle
+          @click="scrollToBottom(true)"
+        >
+          <el-icon><ArrowDown /></el-icon>
+        </el-button>
+      </transition>
 
       <!-- 输入区域 -->
       <div class="chat-input">
@@ -102,7 +115,7 @@
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
-import { Promotion, Loading, Monitor, Delete } from '@element-plus/icons-vue'
+import { Promotion, Loading, Monitor, Delete, ArrowDown } from '@element-plus/icons-vue'
 import { getAllKB } from '../api/knowledge'
 import { useChatStore } from '../stores/chat'
 import ChatMessage from '../components/ChatMessage.vue'
@@ -160,15 +173,36 @@ function selectKb(kb) {
 /** 清空当前对话 */
 function clearChat() {
   chatStore.reset()
+  // 清空后消息区回到顶部，恢复自动跟随，否则该按钮会一直留在页面上
+  autoScroll.value = true
   ElMessage.success('已清空对话')
 }
 
-/** 自动滚动到底部 */
-async function scrollToBottom() {
+/**
+ * 是否跟随最新内容自动滚动
+ * 用户手动上滑查看前文时置为 false，此时流式回答继续写入也不会把界面拉回底部；
+ * 滑回底部（或点「回到底部」按钮、重新提问）后恢复跟随
+ */
+const autoScroll = ref(true)
+
+/** 距底部多少像素以内算"还停在底部"：留一点余量，避免滚动惯性和取整导致误判 */
+const BOTTOM_THRESHOLD = 60
+
+/** 滚动到底部（force=true 时无论用户是否上滑都拉回底部，并恢复自动跟随） */
+async function scrollToBottom(force = false) {
+  if (force) autoScroll.value = true
+  if (!autoScroll.value) return
   await nextTick()
-  if (messagesRef.value) {
-    messagesRef.value.scrollTop = messagesRef.value.scrollHeight
-  }
+  const el = messagesRef.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+
+/** 监听滚动，判断用户是否仍停在底部 */
+function onMessagesScroll() {
+  const el = messagesRef.value
+  if (!el) return
+  const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+  autoScroll.value = distance <= BOTTOM_THRESHOLD
 }
 
 /** 发送问题 */
@@ -180,7 +214,8 @@ async function sendQuestion() {
   // 请求在 store 中执行，切页/组件卸载都不会中断
   // 带上当前知识库，回答上会标注它基于哪个知识库（对话可跨知识库延续）
   const promise = chatStore.sendQuestion(q, selectedKb.value)
-  scrollToBottom()
+  // 主动提问说明用户想看新回答，此时强制回到底部并恢复自动跟随
+  scrollToBottom(true)
   await promise
   scrollToBottom()
 }
@@ -196,7 +231,8 @@ async function handleFeedback(index, value, comment) {
   }
 }
 
-// 流式过程中内容不断增长，持续滚动到底部
+// 流式过程中内容不断增长，跟在底部时才继续滚动；
+// 用户上滑查看前文后 autoScroll 为 false，回答继续生成也不会打断阅读
 watch(
   () => messages.value[messages.value.length - 1]?.content,
   () => {
@@ -206,7 +242,8 @@ watch(
 
 onMounted(async () => {
   await loadKBList()
-  scrollToBottom()
+  // 回到页面时定位到最新一条，正在生成的回答不用手动往下翻
+  scrollToBottom(true)
 })
 </script>
 
@@ -286,6 +323,7 @@ onMounted(async () => {
 
 /* 右侧对话区域 */
 .chat-main {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -324,6 +362,36 @@ onMounted(async () => {
   flex: 1;
   overflow-y: auto;
   padding: 24px;
+}
+
+/* 「回到底部」按钮：悬浮在消息区右下角，与输入框拉开一点距离 */
+.to-bottom-btn {
+  position: absolute;
+  right: 28px;
+  bottom: 100px;
+  width: 38px;
+  height: 38px;
+  color: #409eff;
+  background: #fff;
+  border-color: #dcdfe6;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+  z-index: 10;
+}
+
+.to-bottom-btn:hover {
+  color: #fff;
+  background: #409eff;
+  border-color: #409eff;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 
 .welcome {

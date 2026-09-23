@@ -116,13 +116,14 @@
         </div>
         <div class="detail-item">
           <div class="detail-label">回答：</div>
-          <div class="detail-value answer">{{ currentChat.answer }}</div>
+          <!-- 与问答页一致：按 Markdown 呈现，[来源N] 角标点击展开对应来源原文 -->
+          <div class="detail-value answer md-body" v-html="answerHtml" @click="onAnswerClick"></div>
         </div>
         <div class="detail-item" v-if="currentChat.source_docs?.length">
           <div class="detail-label">参考来源：</div>
           <div class="detail-value">
-            <!-- 知识溯源：点击来源标签可展开原文，答案中引用了该来源的句子会高亮 -->
-            <el-collapse class="source-collapse">
+            <!-- 知识溯源：点击来源标签可展开原文，答案中引用了该来源的内容会高亮 -->
+            <el-collapse v-model="activeSources" class="source-collapse">
               <el-collapse-item
                 v-for="(src, i) in currentChat.source_docs"
                 :key="i"
@@ -173,6 +174,7 @@ import { getChatHistory } from '../api/chat'
 import { getAllKB } from '../api/knowledge'
 import { getUserOptions } from '../api/user'
 import { useUserStore } from '../stores/user'
+import { renderMarkdown, CITE_CLASS } from '../utils/markdown'
 
 const userStore = useUserStore()
 const { isAdmin } = storeToRefs(userStore)
@@ -184,6 +186,17 @@ const total = ref(0)
 const kbOptions = ref([])
 const userOptions = ref([])
 const currentChat = ref(null)
+/** 详情里已展开原文的来源（el-collapse 用数组下标作 name） */
+const activeSources = ref([])
+
+/** 详情中的回答按 Markdown 渲染（历史记录里存的是原始 Markdown 文本） */
+const answerHtml = computed(() =>
+  currentChat.value
+    ? renderMarkdown(currentChat.value.answer || '', {
+        sources: currentChat.value.source_docs || []
+      }).html
+    : ''
+)
 
 const queryParams = reactive({
   page: 1,
@@ -258,7 +271,19 @@ function rowClassName({ row }) {
 
 function showDetail(row) {
   currentChat.value = row
+  activeSources.value = []
   detailVisible.value = true
+}
+
+/** 点击回答中的 [来源N] 角标：展开对应来源的原文 */
+function onAnswerClick(e) {
+  const badge = e.target.closest?.(`.${CITE_CLASS}`)
+  if (!badge) return
+  const index = Number(badge.dataset.cite)
+  const sources = currentChat.value?.source_docs || []
+  const pos = sources.findIndex((src, i) => (src.index ?? i + 1) === index)
+  if (pos === -1 || activeSources.value.includes(pos)) return
+  activeSources.value = [...activeSources.value, pos]
 }
 
 onMounted(() => {
@@ -310,11 +335,13 @@ onMounted(() => {
   font-weight: 500;
 }
 
+/* 回答由 Markdown 渲染，排版交给 .md-body（assets/markdown.css） */
 .detail-value.answer {
+  flex: 1;
+  min-width: 0;
   background: #f5f7fa;
   padding: 12px;
   border-radius: 6px;
-  white-space: pre-wrap;
 }
 
 .source-tag {

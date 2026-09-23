@@ -8,25 +8,11 @@
       <!-- 用户消息按纯文本展示 -->
       <div v-if="isUser" class="message-text">{{ message.content }}</div>
 
-      <!-- AI回答：按句子切分，引用来源的句子加高亮底色，[来源N] 渲染为可点击角标 -->
+      <!-- AI回答：Markdown 渲染成 HTML；[来源N] 为可点击角标，有出处的内容块加淡黄底纹 -->
       <div v-else class="message-text">
         <!-- 标注这条回答基于哪个知识库：对话可以跨知识库延续，不标注容易看混 -->
         <div v-if="message.kbName" class="answer-kb">{{ message.kbName }}</div>
-        <span
-          v-for="(sentence, si) in sentences"
-          :key="si"
-          class="sentence"
-          :class="{ 'is-cited': sentence.cited }"
-        >
-          <template v-for="(seg, gi) in sentence.segments" :key="gi">
-            <span v-if="seg.type === 'text'">{{ seg.text }}</span>
-            <el-tooltip v-else :content="`查看原文：${sourceTitle(seg.index)}`" placement="top">
-              <span class="cite-badge" @click="openSource(seg.index)">
-                {{ seg.raw }}
-              </span>
-            </el-tooltip>
-          </template>
-        </span>
+        <div class="md-body" v-html="rendered.html" @click="onContentClick"></div>
       </div>
 
       <!-- AI回答时显示参考来源（编号与回答中的 [来源N] 角标对应，点击可看原文） -->
@@ -126,21 +112,22 @@
 /**
  * 对话消息气泡组件
  * 区分用户消息和AI回答，AI回答支持：
- * 1. 知识溯源：解析回答中的 [来源N] 标记，高亮引用句，点击角标查看原文并高亮被引用片段
- * 2. 反馈：赞 / 踩（踩可附原因），提交给后端用于后续优化
+ * 1. Markdown 渲染：标题、列表、表格、代码块等按 Markdown 呈现，而不是显示语法符号
+ * 2. 知识溯源：回答中的 [来源N] 渲染为可点击角标，点击查看原文并高亮被引用片段
+ * 3. 反馈：赞 / 踩（踩可附原因），提交给后端用于后续优化
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { UserFilled, Monitor, CaretTop, CaretBottom } from '@element-plus/icons-vue'
+import { renderMarkdown, CITE_CLASS } from '../utils/markdown'
 
 const props = defineProps({
   /** 消息对象 { role, content, sources?, kbId?, kbName?, chatId?, feedback?, feedbackComment? } */
-  message: { type: Object, required: true }
+  message: { type: Object, required: true },
+  /** 是否正在流式输出（决定 Markdown 实时渲染的节流与代码围栏补全） */
+  streaming: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['feedback'])
-
-/** 引用标记：允许 [来源1] / [来源 1] 两种写法 */
-const CITE_RE = /\[来源\s*(\d+)\]/g
 
 /** 是否为用户消息 */
 const isUser = computed(() => props.message.role === 'user')
@@ -151,73 +138,62 @@ const avatarStyle = computed(() => ({
 }))
 
 /**
- * 判断 [来源N] 是否为有效引用
- * 模型可能写出超出检索结果范围的编号（如 [来源0]、[来源9]），
- * 这类标记点开无内容可看，按普通文本处理
+ * 渲染结果：{ html, citeMap }
+ * citeMap 记录每个来源第一次被引用时的整块文本，用于在原文里定位片段
  */
-function isValidCite(index) {
-  const sources = props.message.sources || []
-  return index >= 1 && !!sources[index - 1]
+const rendered = ref({ html: '', citeMap: {} })
+
+/** 流式渲染节流间隔：每个 token 都重排整篇 Markdown 会明显掉帧 */
+const STREAM_RENDER_INTERVAL = 80
+let renderTimer = null
+
+/** 立即按当前内容渲染 */
+function doRender() {
+  rendered.value = renderMarkdown(props.message.content || '', {
+    sources: props.message.sources || [],
+    streaming: props.streaming
+  })
 }
 
 /**
- * 把回答按句子切分，并解析每句中的引用标记
- * 返回 [{ text, cited, segments: [{type:'text'|'cite', text?, index?, raw?}] }]
+ * 内容/来源变化时重新渲染
+ * 流式输出期间按固定间隔合并渲染，回答结束后立即渲染最终版本
+ * （最终版本会补全未闭合的代码块围栏，避免结束时样式停在一半）
  */
-const sentences = computed(() => {
-  if (!props.message.content) return []
-  // 以句末标点或换行切分，保留标点；不用 lookbehind 以兼容更多浏览器
-  const raw = props.message.content.match(/[^。！？!?\n]*[。！？!?\n]?/g) || []
+watch(
+  [() => props.message.content, () => props.message.sources, () => props.streaming],
+  () => {
+    if (!props.streaming) {
+      clearTimeout(renderTimer)
+      renderTimer = null
+      doRender()
+      return
+    }
+    if (renderTimer) return
+    renderTimer = setTimeout(() => {
+      renderTimer = null
+      doRender()
+    }, STREAM_RENDER_INTERVAL)
+  },
+  { immediate: true }
+)
 
-  return raw
-    .filter((s) => s !== '')
-    .map((sentence) => {
-      const segments = []
-      let last = 0
-      CITE_RE.lastIndex = 0
-      let m
-      while ((m = CITE_RE.exec(sentence)) !== null) {
-        const index = Number(m[1])
-        // 非有效引用：原样保留文本，不做成可点击角标
-        if (!isValidCite(index)) continue
+onBeforeUnmount(() => clearTimeout(renderTimer))
 
-        if (m.index > last) {
-          segments.push({ type: 'text', text: sentence.slice(last, m.index) })
-        }
-        segments.push({ type: 'cite', index, raw: m[0] })
-        last = m.index + m[0].length
-      }
-      if (last < sentence.length) {
-        segments.push({ type: 'text', text: sentence.slice(last) })
-      }
-      return {
-        text: sentence,
-        cited: segments.some((seg) => seg.type === 'cite'),
-        segments
-      }
-    })
-})
-
-/** 每个来源编号第一次被引用时的句子，用于在原文里定位片段 */
-const citeSentenceMap = computed(() => {
-  const map = {}
-  sentences.value.forEach((s) => {
-    s.segments.forEach((seg) => {
-      if (seg.type === 'cite' && map[seg.index] === undefined) {
-        map[seg.index] = s.text
-      }
-    })
-  })
-  return map
-})
+/** 点击回答中的来源角标：事件委托，避免给每个角标单独挂监听 */
+function onContentClick(e) {
+  const badge = e.target.closest?.(`.${CITE_CLASS}`)
+  if (!badge) return
+  openSource(Number(badge.dataset.cite))
+}
 
 /** 溯源抽屉 */
 const sourceVisible = ref(false)
 const activeSource = ref(null)
 
-/** 当前来源在答案中被引用的句子 */
+/** 当前来源在答案中被引用的那段文本 */
 const activeSentence = computed(() =>
-  activeSource.value ? citeSentenceMap.value[activeSource.value.index] || '' : ''
+  activeSource.value ? rendered.value.citeMap[activeSource.value.index] || '' : ''
 )
 
 /**
@@ -259,12 +235,6 @@ const highlightedContent = computed(() => {
     { text: content.slice(idx + frag.length), mark: false }
   ]
 })
-
-/** 来源标题（用于角标 tooltip） */
-function sourceTitle(index) {
-  const src = (props.message.sources || []).find((s) => s.index === index)
-  return src ? src.file_name : `来源${index}`
-}
 
 /** 打开溯源抽屉 */
 function openSource(index) {
@@ -319,13 +289,14 @@ function confirmDislike() {
   border-radius: 12px;
   line-height: 1.6;
   word-break: break-word;
-  white-space: pre-wrap;
 }
 
 .user-bubble {
   background: #409eff;
   color: #fff;
   border-top-right-radius: 4px;
+  /* 用户提问是纯文本，保留换行；AI回答走 Markdown，由块级元素排版 */
+  white-space: pre-wrap;
 }
 
 .ai-bubble {
@@ -351,38 +322,7 @@ function confirmDislike() {
   border-radius: 4px;
 }
 
-/* 引用参考资料的回答句子：加淡黄底纹，体现"答案高亮引用原文"
-   色值刻意压得很淡，因为一条有据可依的回答几乎每句都会被引用，
-   底色过重会把整个气泡染黄，反而影响阅读 */
-.sentence.is-cited {
-  background: rgba(255, 214, 102, 0.18);
-  border-radius: 3px;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
-}
-
-/* [来源N] 引用角标 */
-.cite-badge {
-  display: inline-block;
-  margin: 0 2px;
-  padding: 0 5px;
-  font-size: 12px;
-  line-height: 17px;
-  color: #409eff;
-  background: #ecf5ff;
-  border: 1px solid #b3d8ff;
-  border-radius: 9px;
-  cursor: pointer;
-  user-select: none;
-  vertical-align: 1px;
-  transition: all 0.2s;
-}
-
-.cite-badge:hover {
-  color: #fff;
-  background: #409eff;
-  border-color: #409eff;
-}
+/* AI回答的 Markdown 排版样式在 assets/markdown.css 中统一维护（问答气泡与对话历史详情共用） */
 
 .sources {
   margin-top: 10px;

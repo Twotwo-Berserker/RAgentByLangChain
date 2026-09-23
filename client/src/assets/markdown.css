@@ -1,0 +1,159 @@
+/**
+ * AI回答的 Markdown 正文样式
+ *
+ * 由 renderMarkdown（utils/markdown.js）生成的 HTML 统一挂 .md-body 类，
+ * 问答气泡与对话历史详情共用这里的一套排版，避免两处各写一份。
+ * 因为是全局样式（内容由 v-html 注入，不在任何组件的 scoped 作用域内），
+ * 选择器一律以 .md-body 开头，不影响其他区域。
+ */
+
+.md-body {
+  font-size: 14px;
+}
+
+/* 首尾块不留外边距，避免容器上下多出一截空白 */
+.md-body > :first-child {
+  margin-top: 0;
+}
+
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+
+.md-body p {
+  margin: 0 0 8px;
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  margin: 12px 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.md-body ul,
+.md-body ol {
+  margin: 0 0 8px;
+  padding-left: 22px;
+}
+
+.md-body li {
+  margin: 2px 0;
+}
+
+.md-body li > ul,
+.md-body li > ol {
+  margin: 2px 0;
+}
+
+.md-body blockquote {
+  margin: 0 0 8px;
+  padding: 4px 12px;
+  color: #606266;
+  background: #fff;
+  border-left: 3px solid #dcdfe6;
+  border-radius: 0 4px 4px 0;
+}
+
+/* 行内代码 */
+.md-body code {
+  padding: 1px 5px;
+  font-family: Consolas, Monaco, 'Courier New', monospace;
+  font-size: 13px;
+  color: #c7254e;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+}
+
+/* 代码块 */
+.md-body pre {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background: #282c34;
+  border-radius: 6px;
+}
+
+.md-body pre code {
+  padding: 0;
+  color: #abb2bf;
+  background: none;
+  border: none;
+  border-radius: 0;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+/* 表格：列多时横向滚动，不撑破容器 */
+.md-body table {
+  display: block;
+  max-width: 100%;
+  margin: 0 0 8px;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.md-body th,
+.md-body td {
+  padding: 6px 10px;
+  text-align: left;
+  border: 1px solid #dcdfe6;
+}
+
+.md-body th {
+  font-weight: 600;
+  background: #fff;
+}
+
+.md-body a {
+  color: #409eff;
+  text-decoration: none;
+}
+
+.md-body a:hover {
+  text-decoration: underline;
+}
+
+.md-body hr {
+  margin: 10px 0;
+  border: none;
+  border-top: 1px solid #e4e7ed;
+}
+
+/* 引用参考资料的内容块：加淡黄底纹，体现"答案有出处"
+   色值刻意压得很淡，因为一条有据可依的回答几乎每段都会被引用，
+   底色过重会把整块内容染黄，反而影响阅读 */
+.md-body .is-cited {
+  background: rgba(255, 214, 102, 0.18);
+  border-radius: 3px;
+}
+
+/* [来源N] 引用角标 */
+.md-body .cite-badge {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 0 5px;
+  font-size: 12px;
+  line-height: 17px;
+  color: #409eff;
+  background: #ecf5ff;
+  border: 1px solid #b3d8ff;
+  border-radius: 9px;
+  cursor: pointer;
+  user-select: none;
+  vertical-align: 1px;
+  transition: all 0.2s;
+}
+
+.md-body .cite-badge:hover {
+  color: #fff;
+  background: #409eff;
+  border-color: #409eff;
+}
